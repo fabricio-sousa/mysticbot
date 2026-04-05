@@ -30,6 +30,7 @@ STRIKE_LIMIT = 3
 STOP_LOSS_THRESHOLD = 0.40 
 OVERRIDE_TRIGGERED = False
 SESSION_PNL = 0.00         
+PENDING_ORDER = False  # NEW: Atomic lock
 
 # --- RSI GUARDRAILS ---
 RSI_PERIOD = 9        
@@ -87,12 +88,17 @@ def save_state(state):
 def update_trades_json(trade_entry):
     trades = []
     trade_entry["category"] = "bot"
-    if os.path.exists(TRADES_FILE):
-        with open(TRADES_FILE, "r") as f:
-            try: trades = json.load(f)
-            except: trades = []
-    trades.append(trade_entry)
-    with open(TRADES_FILE, "w") as f: json.dump(trades, f, indent=2)
+    try:
+        if os.path.exists(TRADES_FILE):
+            with open(TRADES_FILE, "r") as f:
+                try: trades = json.load(f)
+                except: trades = []
+        trades.append(trade_entry)
+        with open(TRADES_FILE, "w") as f: json.dump(trades, f, indent=2)
+        return True
+    except Exception as e:
+        log(f"⚠️ JSON Write Error: {e}")
+        return False
 
 def safe_price_cents(value) -> int:
     try: return int(round(float(value or 0) * 100))
@@ -120,14 +126,12 @@ def place_order(ticker, side, count, action, price_cents=None):
                                    no_price=actual_limit if side=="no" else None)
         if not hasattr(resp, 'order'): return False, 0, 0
         ex_id = resp.order.order_id 
-        # Polling for 15 seconds
-        for _ in range(10):
+        for _ in range(12):
             time.sleep(1.5)
             order_info = client.get_order(ex_id).order
             status = getattr(order_info, 'status', '').lower()
             filled_qty = getattr(order_info, 'filled', getattr(order_info, 'filled_count', 0))
             avg_price = getattr(order_info, 'avg_fill_price', getattr(order_info, 'avg_price', 0))
-            # FIX: Accept partial fills as a "success" to start monitoring
             if status in ['filled', 'partially_filled'] or filled_qty > 0:
                 return True, (avg_price if avg_price > 0 else price_cents), filled_qty
         return False, 0, 0
@@ -136,16 +140,14 @@ def place_order(ticker, side, count, action, price_cents=None):
 
 # ====================== RECOVERY ENGINE ======================
 def sync_portfolio_to_state(client, state):
-    """Detects 'Ghost Trades' in portfolio and adopts them into bot state"""
     try:
         portfolio = client.get_portfolio().positions
         for pos in portfolio:
             if "KXBTC" in pos.ticker and pos.position != 0:
-                # If we have a position but state is empty, adopt it
                 if not state.get("current_trade"):
                     side = "yes" if pos.position > 0 else "no"
                     qty = abs(pos.position)
-                    log(f"🔄 Recovery: Detected {qty}x {side.upper()} ghost trade. Adopting...")
+                    log(f"🔄 Recovery: Adopting {qty}x {side.upper()} position.")
                     state["current_trade"] = {
                         "ticker": pos.ticker, "side": side, "count": qty, 
                         "actual_entry_price": 0, "status": "filled" 
@@ -157,7 +159,7 @@ def sync_portfolio_to_state(client, state):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log(f"🪄 Magick Bot v5.2.13 Active (Deep Recovery)")
+    log(f"🪄 Magick Bot v5.2.14 Active (Atomic Shield)")
     
     while True:
         try:
@@ -168,9 +170,9 @@ if __name__ == "__main__":
 
             now_et = datetime.now(pytz.timezone("US/Eastern"))
             state = load_state()
-            cash = client.get_balance().balance / 100.0
+            cash_data = client.get_balance()
+            cash = cash_data.balance / 100.0
             
-            # --- NEW: Continuous Portfolio Sync ---
             sync_portfolio_to_state(client, state)
             curr = state.get("current_trade")
             
@@ -199,26 +201,21 @@ if __name__ == "__main__":
             if curr and curr.get("status") == "filled":
                 m_live = client.get_market(curr['ticker']).market
                 live_bid = safe_price_cents(m_live.yes_bid_dollars if curr['side'] == "yes" else m_live.no_bid_dollars)
-                entry_p = curr['actual_entry_price']
-                stop_p = entry_p * (1 - STOP_LOSS_THRESHOLD)
-
-                if entry_p > 0 and 0 < live_bid <= stop_p and time_left > 0.5:
-                    log(f"🚨 STOP LOSS: Selling {curr['ticker']} (Live: {live_bid}c | SL: {stop_p}c)")
-                    success, _, _ = place_order(curr['ticker'], curr['side'], curr['count'], "sell", live_bid)
-                    if success:
-                        pnl = (live_bid - entry_p) * curr['count'] / 100.0
-                        update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "STOP_LOSS"})
-                        SESSION_PNL += pnl
-                        state["current_trade"] = None; state["strikes"] += 1
-                        save_state(state); play_sound("stop"); continue
+                entry_p = curr.get('actual_entry_price', 0)
+                if entry_p > 0:
+                    stop_p = entry_p * (1 - STOP_LOSS_THRESHOLD)
+                    if 0 < live_bid <= stop_p and time_left > 0.5:
+                        log(f"🚨 STOP LOSS: Selling {curr['ticker']} (Live: {live_bid}c)")
+                        success, _, _ = place_order(curr['ticker'], curr['side'], curr['count'], "sell", live_bid)
+                        if success:
+                            pnl = (live_bid - entry_p) * curr['count'] / 100.0
+                            update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "STOP_LOSS"})
+                            SESSION_PNL += pnl
+                            state["current_trade"] = None; save_state(state); play_sound("stop"); continue
 
             # --- HEARTBEAT ---
-            status_text = f" [IN: {curr['side'].upper()} @ {curr.get('actual_entry_price')}c]" if curr else ""
-            risk_pct = int(risk_decimal * 100)
-            print(f"\r[{now_et.strftime('%H:%M:%S')}] RSI: {current_rsi} | Risk: {risk_pct}% | Cash: ${cash:.2f} | PnL: ${SESSION_PNL:+.2f}{status_text}", end="")
-
-            if not is_trading_window and not curr:
-                time.sleep(10); continue
+            status_text = f" [IN: {curr['side'].upper()}]" if curr else ""
+            print(f"\r[{now_et.strftime('%H:%M:%S')}] RSI: {current_rsi} | Cash: ${cash:.2f} | PnL: ${SESSION_PNL:+.2f}{status_text}", end="")
 
             # --- SETTLEMENT ---
             if curr and market.ticker != curr["ticker"]:
@@ -229,33 +226,34 @@ if __name__ == "__main__":
                 if res in ['yes', 'no']:
                     won = (curr['side'] == res)
                     entry_p = curr.get('actual_entry_price', 0)
-                    # If entry_p is 0 (recovered trade), we estimate PnL from balance or just log the win
                     pnl = (100 - entry_p) * curr['count'] / 100.0 if won else -(entry_p * curr['count'] / 100.0)
+                    log(f"🏁 RESULT: {res.upper()} | PnL: ${pnl:+.2f}")
+                    # FORCE JSON UPDATE
                     update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "SETTLEMENT"})
                     SESSION_PNL += pnl
-                    log(f"🏁 RESULT: {res.upper()} | {'WIN' if won else 'LOSS'} | PnL: ${pnl:+.2f}")
                     state["strikes"] = 0 if won else state.get("strikes", 0) + 1
-                    state["current_trade"] = None; save_state(state)
-                    play_sound("settle_win" if won else "settle_loss")
+                    state["current_trade"] = None; save_state(state); play_sound("settle_win" if won else "settle_loss")
 
             # --- ENTRY ---
-            elif not curr and is_trading_window and markets:
+            elif not curr and not PENDING_ORDER and is_trading_window and markets:
                 if 2.0 <= time_left <= 6.0:
                     if (93 <= y_ask <= 98) or (93 <= n_ask <= 98):
                         side, price = ("yes", y_ask) if 93 <= y_ask <= 98 else ("no", n_ask)
                         if (side == "yes" and current_rsi < RSI_CRASH_LIMIT) or (side == "no" and current_rsi > RSI_SURGE_LIMIT):
-                            time.sleep(15); continue
+                            continue
 
                         qty = int(min(MAX_POSITION_DOLLARS, (cash * risk_decimal)) * 100 // price)
                         if qty >= 1:
-                            log(f"⚡ Pursuit: {side.upper()} @ {price}c (Qty: {qty} | RSI: {current_rsi})")
+                            PENDING_ORDER = True # LOCK
+                            log(f"⚡ Pursuit: {side.upper()} @ {price}c (Qty: {qty})")
                             success, actual_paid, filled_qty = place_order(market.ticker, side, qty, "buy", price)
-                            if success:
+                            if success and filled_qty > 0:
                                 state["current_trade"] = {"ticker": market.ticker, "side": side, "count": filled_qty, "actual_entry_price": actual_paid, "status": "filled"}
                                 save_state(state); play_sound("buy")
                                 log(f"✅ Active: {filled_qty} contracts @ {actual_paid}c")
+                            PENDING_ORDER = False # UNLOCK
                             time.sleep(10)
 
             time.sleep(1)
         except Exception as e: 
-            log(f"⚠️ Loop Error: {e}"); time.sleep(5)
+            log(f"⚠️ Loop Error: {e}"); PENDING_ORDER = False; time.sleep(5)
