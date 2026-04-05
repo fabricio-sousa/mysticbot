@@ -2,6 +2,7 @@ import os
 import json
 import time
 import uuid
+import requests
 from datetime import datetime
 import pytz
 from kalshi_python_sync import Configuration, KalshiClient
@@ -30,30 +31,53 @@ STOP_LOSS_THRESHOLD = 0.40
 OVERRIDE_TRIGGERED = False
 SESSION_PNL = 0.00         
 
+# --- RSI GUARDRAIL SETTINGS ---
+RSI_MIN_FOR_YES = 35  # Skip YES if RSI < 35 (Too bearish)
+RSI_MAX_FOR_NO = 65   # Skip NO if RSI > 65 (Too bullish)
+RSI_FLOOR_FOR_NO = 40 # Skip NO if RSI < 40 (Bottomed out)
+
 # ====================== DYNAMIC RISK ENGINE ======================
 def get_dynamic_risk():
     tz = pytz.timezone("US/Eastern")
     now = datetime.now(tz)
-    day = now.weekday() # 0=Mon, 1=Tue, ..., 5=Sat, 6=Sun
+    day = now.weekday()
     hour = now.hour
     minute = now.minute
     time_float = hour + (minute / 60.0)
 
-    # --- MONDAY through FRIDAY ---
     if 0 <= day <= 4:
-        if 0.0 <= time_float < 5.0: return 0.05, True    # Safe Overnights (5%)
-        if 5.0 <= time_float < 8.5: return 0.05, True    # Safe / Low Priority (5%)
-        if 10.5 <= time_float < 12.0: return 0.15, True  # High Confidence (15%)
-        if 12.0 <= time_float < 16.0: return 0.10, True  # Balanced Midday (10%)
-        if 16.5 <= time_float < 17.5: return 0.15, True  # Primary Window (15%)
-        if 22.0 <= time_float < 24.0: return 0.05, True  # Asian Open (5%)
-
-    # --- SUNDAY ---
+        if 0.0 <= time_float < 5.0: return 0.05, True
+        if 5.0 <= time_float < 8.5: return 0.05, True
+        if 10.5 <= time_float < 12.0: return 0.15, True
+        if 12.0 <= time_float < 16.0: return 0.10, True
+        if 16.5 <= time_float < 17.5: return 0.15, True
+        if 22.0 <= time_float < 24.0: return 0.05, True
     elif day == 6:
-        if 12.0 <= time_float < 17.0: return 0.05, True  # Sunday (5%)
-
-    # --- STANDBY MODE (24/7) ---
+        if 12.0 <= time_float < 17.0: return 0.05, True
     return 0.01, True
+
+# ====================== TECHNICAL ANALYTICS ======================
+def get_btc_rsi():
+    """Fetches 1m BTC/USD RSI from Bitfinex Public API"""
+    try:
+        # Fetch last 30 candles (1m) to calculate 14-period RSI
+        url = "https://api-pub.bitfinex.com/v2/candles/trade:1m:tBTCUSD/hist?limit=30"
+        resp = requests.get(url, timeout=5).json()
+        closes = [c[2] for c in resp][::-1] # Close prices, chronologically
+        
+        deltas = [closes[i+1] - closes[i] for i in range(len(closes)-1)]
+        gains = [d if d > 0 else 0 for d in deltas]
+        losses = [-d if d < 0 else 0 for d in deltas]
+        
+        avg_gain = sum(gains[-14:]) / 14
+        avg_loss = sum(losses[-14:]) / 14
+        
+        if avg_loss == 0: return 100
+        rs = avg_gain / avg_loss
+        return round(100 - (100 / (1  + rs)), 1)
+    except Exception as e:
+        log(f"⚠️ RSI Fetch Error: {e}")
+        return 50.0 # Neutral fallback
 
 # ====================== HELPERS ======================
 def log(msg: str):
@@ -103,21 +127,14 @@ def place_order(ticker, side, count, action, price_cents=None):
     try:
         order_id = str(uuid.uuid4())
         actual_limit = min(99, price_cents + MAX_SLIPPAGE) if action == "buy" else max(1, price_cents - MAX_SLIPPAGE)
-        
-        # 1. Create order
         resp = client.create_order(ticker=ticker, side=side, action=action, count=count, type="limit", 
                                    client_order_id=order_id, yes_price=actual_limit if side=="yes" else None, 
                                    no_price=actual_limit if side=="no" else None)
-        
-        # 2. Direct Polling for Actual Fill Data
         for _ in range(5):
             time.sleep(1.5)
             order_info = client.get_order(resp.order_id).order
             if order_info.status == 'filled' or order_info.filled_count > 0:
-                # Return Success, Actual Avg Price, and Actual Quantity Filled
                 return True, order_info.avg_fill_price, order_info.filled_count
-            if order_info.status in ['canceled', 'expired']:
-                break
         return False, 0, 0
     except Exception as e: 
         log(f"❌ Order Error: {e}")
@@ -125,7 +142,7 @@ def place_order(ticker, side, count, action, price_cents=None):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log(f"🪄 Magick Bot v5.2.5 Active (Direct Feedback)")
+    log(f"🪄 Magick Bot v5.2.6 Active (Sentinel RSI)")
     
     while True:
         try:
@@ -139,6 +156,7 @@ if __name__ == "__main__":
             cash = client.get_balance().balance / 100.0
             curr = state.get("current_trade")
             risk_decimal, is_trading_window = get_dynamic_risk()
+            current_rsi = get_btc_rsi()
 
             if OVERRIDE_TRIGGERED:
                 log("🛠️ Manual Override: Clearing State"); state["current_trade"] = None
@@ -177,7 +195,7 @@ if __name__ == "__main__":
 
             # --- HEARTBEAT ---
             status_text = f" [IN: {curr['side'].upper()} @ {curr.get('actual_entry_price')}c]" if curr else ""
-            print(f"\r[{now_et.strftime('%H:%M:%S')}] Risk: {int(risk_decimal*100)}% | Cash: ${cash:.2f} | Session: ${SESSION_PNL:+.2f}{status_text}", end="")
+            print(f"\r[{now_et.strftime('%H:%M:%S')}] RSI: {current_rsi} | Cash: ${cash:.2f} | PnL: ${SESSION_PNL:+.2f}{status_text}", end="")
 
             if not is_trading_window and not curr:
                 time.sleep(10); continue
@@ -200,24 +218,33 @@ if __name__ == "__main__":
                     state["current_trade"] = None; save_state(state)
                     play_sound("settle_win" if won else "settle_loss")
 
-            # --- ENTRY ---
+            # --- ENTRY WITH RSI GUARDRAILS ---
             elif not curr and is_trading_window:
                 if 2.0 <= time_left <= 6.0 and (93 <= y_p <= 98 or 93 <= n_p <= 98):
                     side, price = ("yes", y_p) if 93 <= y_p <= 98 else ("no", n_p)
+                    
+                    # Apply Guards
+                    if side == "yes" and current_rsi < RSI_MIN_FOR_YES:
+                        log(f"🛡️ Guard: Skipping YES (RSI {current_rsi} < {RSI_MIN_FOR_YES})"); time.sleep(15); continue
+                    if side == "no":
+                        if current_rsi > RSI_MAX_FOR_NO:
+                            log(f"🛡️ Guard: Skipping NO (RSI {current_rsi} > {RSI_MAX_FOR_NO})"); time.sleep(15); continue
+                        if current_rsi < RSI_FLOOR_FOR_NO:
+                            log(f"🛡️ Guard: Skipping NO (RSI {current_rsi} < {RSI_FLOOR_FOR_NO})"); time.sleep(15); continue
+
                     qty = int(min(MAX_POSITION_DOLLARS, (cash * risk_decimal)) * 100 // price)
                     if qty >= 1:
-                        log(f"⚡ Pursuit: {side.upper()} @ {price}c (Qty: {qty})")
+                        log(f"⚡ Pursuit: {side.upper()} @ {price}c (Qty: {qty} | RSI: {current_rsi})")
                         success, actual_paid, filled_qty = place_order(market.ticker, side, qty, "buy", price)
                         if success and filled_qty > 0:
                             state["current_trade"] = {
                                 "ticker": market.ticker, "side": side, "count": filled_qty, 
-                                "entry_price_cents": actual_paid, "actual_entry_price": actual_paid, "status": "filled"
+                                "actual_entry_price": actual_paid, "status": "filled"
                             }
                             save_state(state); play_sound("buy")
                             log(f"✅ Filled: {filled_qty} contracts @ {actual_paid}c")
                             time.sleep(5)
                         else:
-                            log("⚠️ Entry failed or zero fill. 15s Cooldown...")
                             time.sleep(15)
 
             time.sleep(1)
