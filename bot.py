@@ -25,8 +25,8 @@ STOP_LOSS_THRESHOLD  = 0.40
 
 # --- RSI ---
 RSI_PERIOD      = 9
-RSI_CRASH_LIMIT = 30   # Skip YES entry if RSI too low (bearish momentum)
-RSI_SURGE_LIMIT = 70   # Skip NO  entry if RSI too high (bullish momentum)
+RSI_CRASH_LIMIT = 30   
+RSI_SURGE_LIMIT = 70   
 
 # ====================== HELPERS ======================
 def log(msg: str):
@@ -36,12 +36,11 @@ def log(msg: str):
         f.write(f"[{ts}] {msg}\n")
 
 def load_state() -> dict:
-    """Load persisted state, merging with defaults so new keys are always present."""
     default = {
         "strikes":        0,
         "current_trade":  None,
         "pending_order":  False,
-        "session_pnl":    0.0,   # FIX: persisted so heartbeat is always accurate
+        "session_pnl":    0.0,
     }
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r", encoding="utf-8") as f:
@@ -100,8 +99,8 @@ def get_dynamic_risk() -> tuple[float, bool]:
         if 12.0 <= t < 16.0: return 0.10, True
         if 16.5 <= t < 17.5: return 0.15, True
     elif day == 6:
-        if 12.0 <= t < 17.0: return 0.10, True
-    return 0.01, False   # outside window → is_trading_window = False
+        if 12.0 <= t < 17.0: return 0.05, True
+    return 0.01, False
 
 # ====================== TECHNICAL ANALYTICS ======================
 def get_btc_rsi() -> float:
@@ -114,20 +113,15 @@ def get_btc_rsi() -> float:
         losses  = [-d if d < 0 else 0 for d in deltas]
         avg_gain = sum(gains[-RSI_PERIOD:]) / RSI_PERIOD
         avg_loss = sum(losses[-RSI_PERIOD:]) / RSI_PERIOD
-        if avg_loss == 0:
-            return 100.0
+        if avg_loss == 0: return 100.0
         rs = avg_gain / avg_loss
         return round(100 - (100 / (1 + rs)), 1)
     except Exception:
-        return 50.0   # neutral fallback
+        return 50.0
 
 # ====================== ORDER ENGINE ======================
 def place_order(client, ticker: str, side: str, count: int,
                 action: str, price_cents: int) -> tuple[bool, int, int]:
-    """
-    Submit a limit order and poll until filled or timeout.
-    Returns (success, actual_price_cents, filled_qty).
-    """
     try:
         order_id = str(uuid.uuid4())
         limit    = min(99, price_cents + MAX_SLIPPAGE) if action == "buy" \
@@ -147,37 +141,38 @@ def place_order(client, ticker: str, side: str, count: int,
             qty   = getattr(order, "filled", 0)
             if qty > 0:
                 avg = getattr(order, "avg_fill_price", 0)
-                if avg == 0:
-                    log("⚠️ avg_fill_price is 0 — using limit price as estimate.")
                 return True, (avg if avg > 0 else price_cents), qty
 
-        log(f"⚠️ Order {ex_id} unfilled after polling timeout.")
         return False, 0, 0
-
     except Exception as e:
         log(f"❌ Order Error: {e}")
         return False, 0, 0
 
 # ====================== RECOVERY ENGINE ======================
 def sync_portfolio_to_state(client, state: dict):
-    """Adopt any open KXBTC position that isn't tracked in state (e.g. after a crash)."""
     try:
-        # NEW/FIXED
-        # The SDK returns a GetPositionsResponse which has a .positions attribute
-        positions = client.get_positions().positions    
-        active    = next(
-            (p for p in positions if "KXBTC" in p.ticker and p.position != 0), None
-        )
-        if active and not state["current_trade"]:
-            side = "yes" if active.position > 0 else "no"
-            qty  = abs(active.position)
-            log(f"🔄 Recovery: Adopting {qty}x {side.upper()} on {active.ticker}. "
-                f"⚠️ Entry price unknown — stop-loss disabled for this position.")
+        resp = client.get_positions()
+        positions = getattr(resp, 'market_positions', getattr(resp, 'positions', []))
+        
+        active_pos = None
+        active_qty = 0
+        for p in positions:
+            # SDK Fix: Checks both 'market_position' and 'position' for qty
+            p_qty = getattr(p, 'market_position', getattr(p, 'position', 0))
+            if "KXBTC" in p.ticker and p_qty != 0:
+                active_pos = p
+                active_qty = p_qty
+                break
+        
+        if active_pos and not state["current_trade"]:
+            side = "yes" if active_qty > 0 else "no"
+            qty  = abs(active_qty)
+            log(f"🔄 Recovery: Adopting {qty}x {side.upper()} on {active_pos.ticker}.")
             state["current_trade"] = {
-                "ticker":              active.ticker,
+                "ticker":              active_pos.ticker,
                 "side":                side,
-                "count":               qty,
-                "actual_entry_price":  0,   # unknown; stop-loss guard handles this
+                "count":                qty,
+                "actual_entry_price":  0, 
             }
             state["pending_order"] = False
             save_state(state)
@@ -186,9 +181,8 @@ def sync_portfolio_to_state(client, state: dict):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.3.0 Active (Full Sentinel)")
+    log("🪄 Magick Bot v5.3.2 Active (Sentinel Recovery)")
 
-    # --- API init ---
     with open(APIKEY_FILE,  "r", encoding="utf-8") as f: api_key_id      = f.read().strip()
     with open(PRIVATE_FILE, "r", encoding="utf-8") as f: private_key_pem = f.read()
     config                 = Configuration(host="https://api.elections.kalshi.com/trade-api/v2")
@@ -200,7 +194,6 @@ if __name__ == "__main__":
 
     while True:
         try:
-            # --- Keyboard shortcuts (Windows only) ---
             if HAS_WINDOWS and msvcrt.kbhit():
                 key = msvcrt.getch()
                 if key == b'\x1b':
@@ -209,208 +202,115 @@ if __name__ == "__main__":
                 elif key.lower() == b'c':
                     override_triggered = True
 
-            # --- Load fresh state every tick ---
-            state    = load_state()
-            now_et   = datetime.now(pytz.timezone("US/Eastern"))
-            cash_raw = client.get_balance()
-            cash     = cash_raw.balance / 100.0
+            state = load_state()
+            now_et = datetime.now(pytz.timezone("US/Eastern"))
+            
+            # API Wrapper to prevent crash on timeout
+            try:
+                cash = client.get_balance().balance / 100.0
+            except Exception as e:
+                log(f"⚠️ Balance API error: {e}")
+                time.sleep(2)
+                continue
 
-            # --- Manual override: clear stuck trade ---
             if override_triggered:
-                log("🛠️ Manual Override: Clearing current_trade and pending_order.")
+                log("🛠️ Manual Override: Clearing state.")
                 state["current_trade"] = None
                 state["pending_order"] = False
                 save_state(state)
                 override_triggered = False
 
-            # --- Hard shutdown checks ---
-            if cash <= SAFETY_FLOOR:
-                log(f"🚨 Shutdown: Cash ${cash:.2f} below safety floor ${SAFETY_FLOOR:.2f}")
-                break
-            if state["strikes"] >= STRIKE_LIMIT:
-                log(f"🚨 Shutdown: {state['strikes']} consecutive losses hit strike limit.")
+            if cash <= SAFETY_FLOOR or state["strikes"] >= STRIKE_LIMIT:
+                log(f"🚨 Shutdown triggered. Cash: ${cash} | Strikes: {state['strikes']}")
                 break
 
-            # --- Portfolio recovery ---
             sync_portfolio_to_state(client, state)
             curr = state["current_trade"]
 
-            # --- Fetch open markets ---
+            # Markets
             resp    = client.get_markets(series_ticker="KXBTC15M", limit=5, status="open")
-            markets = [
-                m for m in getattr(resp, "markets", [])
-                if (m.close_time - now_et).total_seconds() > 0
-            ]
+            markets = [m for m in getattr(resp, "markets", []) if (m.close_time - now_et).total_seconds() > 0]
             markets.sort(key=lambda x: x.close_time)
             market    = markets[0] if markets else None
             time_left = (market.close_time - now_et).total_seconds() / 60.0 if market else 0
-            y_ask     = safe_price_cents(market.yes_ask_dollars) if market else 0
-            n_ask     = safe_price_cents(market.no_ask_dollars)  if market else 0
+            
+            current_rsi = get_btc_rsi()
+            risk_decimal, is_window = get_dynamic_risk()
 
-            # --- RSI ---
-            current_rsi              = get_btc_rsi()
-            risk_decimal, is_window  = get_dynamic_risk()
-
-            # =========================================================
-            # BLOCK 1: MONITORING — stop-loss + settlement
-            # Always runs independently of entry logic.
-            # =========================================================
+            # BLOCK 1: MONITORING
             if curr:
                 try:
                     m_live = client.get_market(curr["ticker"]).market
                     status = getattr(m_live, "status", "").lower()
 
-                    # --- Stop-loss (market still open) ---
                     if status == "open":
-                        live_bid = safe_price_cents(
-                            m_live.yes_bid_dollars if curr["side"] == "yes"
-                            else m_live.no_bid_dollars
-                        )
-                        entry_p = curr["actual_entry_price"]
+                        live_bid = safe_price_cents(m_live.yes_bid_dollars if curr["side"] == "yes" else m_live.no_bid_dollars)
+                        entry_p  = curr["actual_entry_price"]
 
-                        if entry_p == 0:
-                            # Recovered position with unknown entry — can't calculate SL
-                            log("ℹ️ Recovered position: entry price unknown, stop-loss inactive.")
-                        elif 0 < live_bid <= entry_p * (1 - STOP_LOSS_THRESHOLD):
-                            log(f"🚨 STOP LOSS: {curr['ticker']} live_bid={live_bid}c "
-                                f"entry={entry_p}c threshold={entry_p*(1-STOP_LOSS_THRESHOLD):.0f}c")
-                            success, _, _ = place_order(
-                                client, curr["ticker"], curr["side"],
-                                curr["count"], "sell", live_bid
-                            )
+                        if entry_p > 0 and 0 < live_bid <= entry_p * (1 - STOP_LOSS_THRESHOLD):
+                            log(f"🚨 STOP LOSS: {curr['ticker']} @ {live_bid}c")
+                            success, _, _ = place_order(client, curr["ticker"], curr["side"], curr["count"], "sell", live_bid)
                             if success:
                                 pnl = (live_bid - entry_p) * curr["count"] / 100.0
-                                update_trades_json({
-                                    "timestamp": now_et.isoformat(),
-                                    "ticker":    curr["ticker"],
-                                    "side":      curr["side"],
-                                    "pnl":       round(pnl, 2),
-                                    "type":      "STOP_LOSS",
-                                })
-                                # FIX: update strikes on stop-loss loss
+                                update_trades_json({"timestamp": now_et.isoformat(), "ticker": curr["ticker"], "pnl": round(pnl, 2), "type": "STOP_LOSS"})
                                 state["strikes"]      += 1
                                 state["session_pnl"]  += pnl
                                 state["current_trade"] = None
-                                state["pending_order"] = False
                                 save_state(state)
                                 play_sound("stop")
-                                log(f"💸 Stop-loss filled. PnL: ${pnl:+.2f} | "
-                                    f"Strikes: {state['strikes']}")
                                 continue
 
-                    # --- Settlement (market closed/settled) ---
                     elif status in ["closed", "settled"]:
                         log(f"⏳ Waiting for result on {curr['ticker']}…")
                         settled = False
-                        for attempt in range(30):   # up to 5 minutes
-                            try:
-                                m_check = client.get_market(curr["ticker"]).market
-                                res     = getattr(m_check, "result", "").lower()
-                                if res in ["yes", "no"]:
-                                    won  = (curr["side"] == res)
-                                    ep   = curr["actual_entry_price"]
-                                    pnl  = (
-                                        (100 - ep) * curr["count"] / 100.0 if won
-                                        else -(ep * curr["count"] / 100.0)
-                                    )
-                                    log(f"🏁 SETTLED: {res.upper()} | "
-                                        f"{'WIN' if won else 'LOSS'} | PnL: ${pnl:+.2f}")
-                                    update_trades_json({
-                                        "timestamp": now_et.isoformat(),
-                                        "ticker":    curr["ticker"],
-                                        "side":      curr["side"],
-                                        "pnl":       round(pnl, 2),
-                                        "type":      "SETTLEMENT",
-                                    })
-                                    # FIX: properly update strikes
-                                    state["strikes"]      = 0 if won else state["strikes"] + 1
-                                    state["session_pnl"] += pnl
-                                    state["current_trade"] = None
-                                    state["pending_order"] = False
-                                    save_state(state)
-                                    play_sound("settle_win" if won else "settle_loss")
-                                    settled = True
-                                    break
-                            except Exception as e:
-                                log(f"⚠️ Settlement poll error (attempt {attempt+1}): {e}")
+                        for attempt in range(30):
+                            m_check = client.get_market(curr["ticker"]).market
+                            res     = getattr(m_check, "result", "").lower()
+                            if res in ["yes", "no"]:
+                                won = (curr["side"] == res)
+                                ep  = curr["actual_entry_price"]
+                                pnl = ((100 - ep) * curr["count"] / 100.0 if won else -(ep * curr["count"] / 100.0))
+                                update_trades_json({"timestamp": now_et.isoformat(), "ticker": curr["ticker"], "pnl": round(pnl, 2), "type": "SETTLE"})
+                                state["strikes"]      = 0 if won else state["strikes"] + 1
+                                state["session_pnl"] += pnl
+                                state["current_trade"] = None
+                                save_state(state)
+                                play_sound("settle_win" if won else "settle_loss")
+                                settled = True
+                                break
                             time.sleep(10)
-
-                        if not settled:
-                            log(f"⚠️ Settlement timeout on {curr['ticker']} after 5 min. "
-                                f"Manual review required.")
-
                 except Exception as e:
                     log(f"⚠️ Monitor Error: {e}")
 
-            # =========================================================
-            # BLOCK 2: ENTRY LOGIC
-            # Only runs when: no active trade, no pending order,
-            # inside trading window, and a market is available.
-            # =========================================================
+            # BLOCK 2: ENTRY
             elif not state["pending_order"] and is_window and market:
+                y_ask = safe_price_cents(market.yes_ask_dollars)
+                n_ask = safe_price_cents(market.no_ask_dollars)
                 if 2.0 <= time_left <= 6.0:
                     if (93 <= y_ask <= 98) or (93 <= n_ask <= 98):
                         side  = "yes" if 93 <= y_ask <= 98 else "no"
                         price = y_ask if side == "yes" else n_ask
-
-                        # RSI filter
-                        if side == "yes" and current_rsi < RSI_CRASH_LIMIT:
-                            log(f"⏭️ Skipping YES: RSI={current_rsi} below crash limit {RSI_CRASH_LIMIT}")
-                        elif side == "no" and current_rsi > RSI_SURGE_LIMIT:
-                            log(f"⏭️ Skipping NO: RSI={current_rsi} above surge limit {RSI_SURGE_LIMIT}")
+                        
+                        if (side == "yes" and current_rsi < RSI_CRASH_LIMIT) or (side == "no" and current_rsi > RSI_SURGE_LIMIT):
+                            log(f"⏭️ Skipping {side.upper()}: RSI {current_rsi} out of bounds.")
                         else:
-                            qty = int(
-                                min(MAX_POSITION_DOLLARS, cash * risk_decimal) * 100 // price
-                            )
+                            qty = int(min(MAX_POSITION_DOLLARS, cash * risk_decimal) * 100 // price)
                             if qty >= 1:
-                                # FIX: persist lock BEFORE calling API
                                 state["pending_order"] = True
                                 save_state(state)
-                                log(f"⚡ Entry: {side.upper()} @ {price}c x{qty} "
-                                    f"| RSI={current_rsi} | Time left={time_left:.1f}m")
-                                try:
-                                    success, actual_paid, filled_qty = place_order(
-                                        client, market.ticker, side, qty, "buy", price
-                                    )
-                                    if success and filled_qty > 0:
-                                        state["current_trade"] = {
-                                            "ticker":             market.ticker,
-                                            "side":               side,
-                                            "count":              filled_qty,
-                                            "actual_entry_price": actual_paid,
-                                        }
-                                        save_state(state)
-                                        play_sound("buy")
-                                        log(f"✅ Filled: {filled_qty}x {side.upper()} "
-                                            f"@ {actual_paid}c on {market.ticker}")
-                                    else:
-                                        log("❌ Entry order failed or unfilled.")
-                                finally:
-                                    # FIX: always release lock, even on exception
-                                    state["pending_order"] = False
+                                success, actual_paid, filled_qty = place_order(client, market.ticker, side, qty, "buy", price)
+                                if success and filled_qty > 0:
+                                    state["current_trade"] = {"ticker": market.ticker, "side": side, "count": filled_qty, "actual_entry_price": actual_paid}
                                     save_state(state)
-                                time.sleep(10)   # brief cooldown after entry attempt
+                                    play_sound("buy")
+                                state["pending_order"] = False
+                                save_state(state)
+                                time.sleep(10)
 
-            # --- Heartbeat (uses persisted session_pnl) ---
             trade_tag = f" [IN: {curr['side'].upper()}]" if curr else ""
-            print(
-                f"\r[{now_et.strftime('%H:%M:%S')}] "
-                f"RSI: {current_rsi} | Cash: ${cash:.2f} | "
-                f"PnL: ${state['session_pnl']:+.2f} | "
-                f"Strikes: {state['strikes']}{trade_tag}   ",
-                end=""
-            )
-
+            print(f"\r[{now_et.strftime('%H:%M:%S')}] RSI: {current_rsi} | Cash: ${cash:.2f} | PnL: ${state['session_pnl']:+.2f} | Strikes: {state['strikes']}{trade_tag}   ", end="")
             time.sleep(1)
 
         except Exception as e:
             log(f"⚠️ Loop Error: {e}")
-            # Safety: release pending lock if a top-level exception fires mid-entry
-            try:
-                state = load_state()
-                if state["pending_order"]:
-                    state["pending_order"] = False
-                    save_state(state)
-            except Exception:
-                pass
             time.sleep(5)
