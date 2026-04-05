@@ -23,10 +23,17 @@ SAFETY_FLOOR         = 1000.0
 STRIKE_LIMIT         = 3
 STOP_LOSS_THRESHOLD  = 0.40
 
+# Entry window: only enter if this many minutes remain on the contract.
+# Floor must exceed polling window + overhead so the market doesn't
+# expire while we're still waiting for a fill.
+# 25 polls × 2s + ~30s overhead = ~80s ≈ 1.4 min → use 3.0 min as safe floor.
+ENTRY_TIME_MIN = 3.0   # minutes remaining — don't enter below this
+ENTRY_TIME_MAX = 6.0   # minutes remaining — don't enter above this
+
 # --- RSI ---
 RSI_PERIOD      = 9
-RSI_CRASH_LIMIT = 30   # Skip YES entry if RSI too low (bearish momentum)
-RSI_SURGE_LIMIT = 70   # Skip NO  entry if RSI too high (bullish momentum)
+RSI_CRASH_LIMIT = 30
+RSI_SURGE_LIMIT = 70
 
 # ====================== HELPERS ======================
 def log(msg: str):
@@ -90,6 +97,20 @@ def play_sound(event_type: str):
     for freq, dur in sounds.get(event_type, []):
         winsound.Beep(freq, dur)
 
+def cancel_order_safe(client, ex_id: str):
+    """
+    Cancel an order, handling 404 gracefully.
+    404 means Kalshi already cleaned it up — not an error worth alerting on.
+    """
+    try:
+        client.cancel_order(ex_id)
+        log(f"🚫 Order {ex_id} cancelled successfully.")
+    except Exception as ce:
+        if "404" in str(ce):
+            log(f"ℹ️ Order {ex_id} already closed/cancelled by Kalshi — no action needed.")
+        else:
+            log(f"⚠️ Cancel failed for {ex_id}: {ce} — verify on Kalshi manually.")
+
 # ====================== DYNAMIC RISK ENGINE ======================
 def get_dynamic_risk() -> tuple[float, bool]:
     tz  = pytz.timezone("US/Eastern")
@@ -127,8 +148,9 @@ def place_order(client, ticker: str, side: str, count: int,
                 action: str, price_cents: int) -> tuple[bool, int, int]:
     """
     Submit a limit order and poll until filled or timeout.
-    On timeout: runs a final fill check, then cancels the order on Kalshi
-    to prevent ghost fills on future ticks.
+    On timeout: runs a final fill check, then cancels to prevent ghost fills.
+    On hard API error (e.g. 404): applies a 10s cooldown before returning
+    so the entry lock isn't released instantly and re-triggered next tick.
     Returns (success, actual_price_cents, filled_qty).
     """
     ex_id = None
@@ -170,25 +192,18 @@ def place_order(client, ticker: str, side: str, count: int,
         except Exception as e:
             log(f"⚠️ Final order check failed: {e}")
 
-        # Cancel the order so it can't fill on a future tick as a ghost
-        log(f"🚫 Cancelling unfilled order {ex_id}...")
-        try:
-            client.cancel_order(ex_id)
-            log(f"✅ Order {ex_id} cancelled successfully.")
-        except Exception as ce:
-            log(f"⚠️ Cancel failed for {ex_id}: {ce} — verify on Kalshi manually.")
-
+        # Cancel so the order can't fill as a ghost on a future tick
+        cancel_order_safe(client, ex_id)
         return False, 0, 0
 
     except Exception as e:
         log(f"❌ Order Error: {e}")
-        # If we have an order ID but hit an unexpected exception, attempt cancel
+        # Cancel if we have an ID but hit an unexpected exception
         if ex_id:
-            try:
-                client.cancel_order(ex_id)
-                log(f"🚫 Order {ex_id} cancelled after unexpected error.")
-            except Exception:
-                pass
+            cancel_order_safe(client, ex_id)
+        # FIX: cooldown on hard failures so the lock isn't released instantly
+        # and the next tick doesn't immediately fire a second order
+        time.sleep(10)
         return False, 0, 0
 
 # ====================== RECOVERY ENGINE ======================
@@ -244,7 +259,7 @@ def sync_portfolio_to_state(client, state: dict):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.3.5 Active (Cancel Guard)")
+    log("🪄 Magick Bot v5.3.6 Active (Tight Window)")
 
     # --- API init ---
     with open(APIKEY_FILE,  "r", encoding="utf-8") as f: api_key_id      = f.read().strip()
@@ -414,9 +429,11 @@ if __name__ == "__main__":
 
             # =================================================================
             # BLOCK 2: ENTRY LOGIC
+            # FIX: Floor raised to ENTRY_TIME_MIN (3.0 min) to ensure the
+            # polling window fits within the contract's remaining lifetime.
             # =================================================================
             elif not state["pending_order"] and is_window and market:
-                if 2.0 <= time_left <= 6.0:
+                if ENTRY_TIME_MIN <= time_left <= ENTRY_TIME_MAX:
                     if (93 <= y_ask <= 98) or (93 <= n_ask <= 98):
                         side  = "yes" if 93 <= y_ask <= 98 else "no"
                         price = y_ask if side == "yes" else n_ask
