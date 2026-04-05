@@ -42,7 +42,7 @@ def get_dynamic_risk():
     if 0 <= day <= 4:
         if 0.0 <= time_float < 5.0: return 0.05, True    
         if 5.0 <= time_float < 8.5: return 0.05, True    
-        if 10.5 <= t < 12.0 or 16.5 <= t < 17.5: return 0.15, True
+        if 10.5 <= time_float < 12.0 or 16.5 <= time_float < 17.5: return 0.15, True
         if 12.0 <= time_float < 16.0: return 0.10, True  
         if 22.0 <= time_float < 24.0: return 0.05, True  
     elif day == 6:
@@ -102,7 +102,6 @@ def place_order(ticker, side, count, action, price_cents=None):
                                    client_order_id=order_id, yes_price=actual_limit if side=="yes" else None, 
                                    no_price=actual_limit if side=="no" else None)
         
-        # UNIVERSAL ID FIX: Handle 'CreateOrderResponse' attribute changes
         target_id = getattr(resp, 'order_id', None)
         if not target_id and hasattr(resp, 'order'):
             target_id = getattr(resp.order, 'order_id', None)
@@ -114,8 +113,6 @@ def place_order(ticker, side, count, action, price_cents=None):
         for _ in range(5):
             time.sleep(1.5)
             order_info = client.get_order(target_id).order
-            
-            # SAFE FILL CHECK: Check for 'filled_count' or 'filled'
             f_qty = getattr(order_info, 'filled_count', getattr(order_info, 'filled', 0))
             
             if order_info.status == 'filled' or f_qty > 0:
@@ -129,7 +126,7 @@ def place_order(ticker, side, count, action, price_cents=None):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log(f"🪄 Magick Bot v5.2.7 Active (Universal ID Fix)")
+    log(f"🪄 Magick Bot v5.2.8 Active (Stable Pulse)")
     
     while True:
         try:
@@ -162,7 +159,6 @@ if __name__ == "__main__":
             else:
                 time_left = 0
 
-            # --- MONITORING / STOP LOSS ---
             if curr and curr.get("status") == "filled":
                 m_live = client.get_market(curr['ticker']).market
                 live_bid = safe_price_cents(m_live.yes_bid_dollars if curr['side'] == "yes" else m_live.no_bid_dollars)
@@ -179,7 +175,6 @@ if __name__ == "__main__":
                         state["current_trade"] = None; state["strikes"] += 1
                         save_state(state); play_sound("stop"); continue
 
-            # --- HEARTBEAT ---
             status_text = f" [IN: {curr['side'].upper()} @ {curr.get('actual_entry_price')}c]" if curr else ""
             print(f"\r[{now_et.strftime('%H:%M:%S')}] Risk: {int(risk_decimal*100)}% | Cash: ${cash:.2f} | Session: ${SESSION_PNL:+.2f}{status_text}", end="")
 
@@ -188,7 +183,6 @@ if __name__ == "__main__":
             if not markets:
                 time.sleep(5); continue
 
-            # --- SETTLEMENT CHECK ---
             if curr and market.ticker != curr["ticker"]:
                 log(f"⏳ Finalizing {curr['ticker']}...")
                 time.sleep(35)
@@ -204,7 +198,6 @@ if __name__ == "__main__":
                     state["current_trade"] = None; save_state(state)
                     play_sound("settle_win" if won else "settle_loss")
 
-            # --- ENTRY ---
             elif not curr and is_trading_window:
                 if 2.0 <= time_left <= 6.0 and (93 <= y_p <= 98 or 93 <= n_p <= 98):
                     side, price = ("yes", y_p) if 93 <= y_p <= 98 else ("no", n_p)
