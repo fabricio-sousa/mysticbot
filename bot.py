@@ -38,10 +38,11 @@ def log(msg: str):
 def load_state() -> dict:
     """Load persisted state, merging with defaults so new keys are always present."""
     default = {
-        "strikes":       0,
-        "current_trade": None,
-        "pending_order": False,
-        "session_pnl":   0.0,
+        "strikes":          0,
+        "current_trade":    None,
+        "pending_order":    False,
+        "pending_order_id": None,   # FIX: persisted so recovery can look up fill price
+        "session_pnl":      0.0,
     }
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r", encoding="utf-8") as f:
@@ -101,7 +102,7 @@ def get_dynamic_risk() -> tuple[float, bool]:
         if 16.5 <= t < 17.5: return 0.15, True
     elif day == 6:
         if 12.0 <= t < 17.0: return 0.05, True
-    return 0.01, False   # outside window → is_trading_window = False
+    return 0.01, False
 
 # ====================== TECHNICAL ANALYTICS ======================
 def get_btc_rsi() -> float:
@@ -119,13 +120,15 @@ def get_btc_rsi() -> float:
         rs = avg_gain / avg_loss
         return round(100 - (100 / (1 + rs)), 1)
     except Exception:
-        return 50.0   # neutral fallback
+        return 50.0
 
 # ====================== ORDER ENGINE ======================
 def place_order(client, ticker: str, side: str, count: int,
                 action: str, price_cents: int) -> tuple[bool, int, int]:
     """
     Submit a limit order and poll until filled or timeout.
+    FIX: Extended polling (40s), plus a final check after timeout
+         to catch late fills before giving up.
     Returns (success, actual_price_cents, filled_qty).
     """
     try:
@@ -141,8 +144,9 @@ def place_order(client, ticker: str, side: str, count: int,
         )
         ex_id = resp.order.order_id
 
-        for _ in range(10):
-            time.sleep(1.5)
+        # FIX: 20 × 2s = 40s polling window (was 10 × 1.5s = 15s)
+        for _ in range(20):
+            time.sleep(2)
             order = client.get_order(ex_id).order
             qty   = getattr(order, "filled", 0)
             if qty > 0:
@@ -151,7 +155,21 @@ def place_order(client, ticker: str, side: str, count: int,
                     log("⚠️ avg_fill_price is 0 — using limit price as estimate. PnL may be slightly off.")
                 return True, (avg if avg > 0 else price_cents), qty
 
-        log(f"⚠️ Order {ex_id} unfilled after polling timeout.")
+        # FIX: One final check after timeout — catches fills that landed just after the loop
+        log(f"⚠️ Order {ex_id} unfilled after polling window. Running final check...")
+        try:
+            final_order = client.get_order(ex_id).order
+            qty = getattr(final_order, "filled", 0)
+            if qty > 0:
+                avg = getattr(final_order, "avg_fill_price", 0)
+                if avg == 0:
+                    log("⚠️ Late fill: avg_fill_price is 0 — using limit price as estimate.")
+                log(f"⚠️ Late fill detected: {qty} contracts @ {avg if avg > 0 else price_cents}c")
+                return True, (avg if avg > 0 else price_cents), qty
+        except Exception as e:
+            log(f"⚠️ Final order check failed: {e}")
+
+        log(f"❌ Order {ex_id} confirmed unfilled. Giving up.")
         return False, 0, 0
 
     except Exception as e:
@@ -160,7 +178,11 @@ def place_order(client, ticker: str, side: str, count: int,
 
 # ====================== RECOVERY ENGINE ======================
 def sync_portfolio_to_state(client, state: dict):
-    """Adopt any open KXBTC position not tracked in state (e.g. after a crash)."""
+    """
+    Adopt any open KXBTC position not tracked in state (e.g. after a crash).
+    FIX: If pending_order_id is in state, look up the actual fill price
+         so stop-loss and PnL calculations remain accurate.
+    """
     try:
         resp      = client.get_positions()
         positions = getattr(resp, "market_positions", getattr(resp, "positions", []))
@@ -171,15 +193,36 @@ def sync_portfolio_to_state(client, state: dict):
                 if not state["current_trade"]:
                     side = "yes" if p_qty > 0 else "no"
                     qty  = abs(p_qty)
-                    log(f"🔄 Recovery: Adopting {qty}x {side.upper()} on {p.ticker}. "
-                        f"⚠️ Entry price unknown — stop-loss disabled for this position.")
+
+                    # FIX: Try to recover actual entry price from the stored order ID
+                    entry_price = 0
+                    pending_id  = state.get("pending_order_id")
+                    if pending_id:
+                        try:
+                            recovered_order = client.get_order(pending_id).order
+                            avg = getattr(recovered_order, "avg_fill_price", 0)
+                            if avg > 0:
+                                entry_price = avg
+                                log(f"🔄 Recovery: Adopting {qty}x {side.upper()} on {p.ticker} "
+                                    f"@ {entry_price}c (price recovered from order {pending_id}).")
+                            else:
+                                log(f"🔄 Recovery: Adopting {qty}x {side.upper()} on {p.ticker}. "
+                                    f"⚠️ Could not recover price from order — stop-loss disabled.")
+                        except Exception as e:
+                            log(f"🔄 Recovery: Adopting {qty}x {side.upper()} on {p.ticker}. "
+                                f"⚠️ Order lookup failed ({e}) — stop-loss disabled.")
+                    else:
+                        log(f"🔄 Recovery: Adopting {qty}x {side.upper()} on {p.ticker}. "
+                            f"⚠️ No order ID in state — stop-loss disabled.")
+
                     state["current_trade"] = {
                         "ticker":             p.ticker,
                         "side":               side,
                         "count":              qty,
-                        "actual_entry_price": 0,   # unknown; SL guard handles this safely
+                        "actual_entry_price": entry_price,
                     }
-                    state["pending_order"] = False
+                    state["pending_order"]    = False
+                    state["pending_order_id"] = None
                     save_state(state)
                 break
 
@@ -188,7 +231,7 @@ def sync_portfolio_to_state(client, state: dict):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.3.3 Active (Iron Sentinel)")
+    log("🪄 Magick Bot v5.3.4 Active (Late Fill Guard)")
 
     # --- API init ---
     with open(APIKEY_FILE,  "r", encoding="utf-8") as f: api_key_id      = f.read().strip()
@@ -225,8 +268,9 @@ if __name__ == "__main__":
             # --- Manual override: clear stuck trade/lock ---
             if override_triggered:
                 log("🛠️ Manual Override: Clearing current_trade and pending_order.")
-                state["current_trade"] = None
-                state["pending_order"] = False
+                state["current_trade"]    = None
+                state["pending_order"]    = False
+                state["pending_order_id"] = None
                 save_state(state)
                 override_triggered = False
 
@@ -264,7 +308,6 @@ if __name__ == "__main__":
 
             # =================================================================
             # BLOCK 1: MONITORING — stop-loss + settlement
-            # Runs independently of entry; a market fetch failure won't skip it.
             # =================================================================
             if curr:
                 try:
@@ -280,7 +323,7 @@ if __name__ == "__main__":
                         entry_p = curr["actual_entry_price"]
 
                         if entry_p == 0:
-                            pass  # Recovered position — entry unknown, SL cannot fire safely
+                            pass  # Entry unknown — SL cannot fire safely
                         elif 0 < live_bid <= entry_p * (1 - STOP_LOSS_THRESHOLD):
                             log(f"🚨 STOP LOSS: {curr['ticker']} "
                                 f"live={live_bid}c entry={entry_p}c "
@@ -300,20 +343,21 @@ if __name__ == "__main__":
                                     "pnl":       round(pnl, 2),
                                     "type":      "STOP_LOSS",
                                 })
-                                state["strikes"]       += 1
-                                state["session_pnl"]   += pnl
-                                state["current_trade"]  = None
-                                state["pending_order"]  = False
+                                state["strikes"]          += 1
+                                state["session_pnl"]      += pnl
+                                state["current_trade"]     = None
+                                state["pending_order"]     = False
+                                state["pending_order_id"]  = None
                                 save_state(state)
                                 play_sound("stop")
                                 continue
 
-                    # --- Settlement retry loop (market closed/settled) ---
+                    # --- Settlement retry loop ---
                     elif status in ["closed", "settled"]:
                         log(f"⏳ Waiting for result on {curr['ticker']}…")
                         settled = False
 
-                        for attempt in range(30):   # polls every 10s, up to 5 minutes
+                        for attempt in range(30):
                             try:
                                 m_check = client.get_market(curr["ticker"]).market
                                 res     = getattr(m_check, "result", "").lower()
@@ -333,10 +377,11 @@ if __name__ == "__main__":
                                         "pnl":       round(pnl, 2),
                                         "type":      "SETTLEMENT",
                                     })
-                                    state["strikes"]       = 0 if won else state["strikes"] + 1
-                                    state["session_pnl"]  += pnl
-                                    state["current_trade"] = None
-                                    state["pending_order"] = False
+                                    state["strikes"]         = 0 if won else state["strikes"] + 1
+                                    state["session_pnl"]    += pnl
+                                    state["current_trade"]   = None
+                                    state["pending_order"]   = False
+                                    state["pending_order_id"] = None
                                     save_state(state)
                                     play_sound("settle_win" if won else "settle_loss")
                                     settled = True
@@ -356,8 +401,6 @@ if __name__ == "__main__":
 
             # =================================================================
             # BLOCK 2: ENTRY LOGIC
-            # Only runs when: no active trade, no pending lock,
-            # inside trading window, market available, time window valid.
             # =================================================================
             elif not state["pending_order"] and is_window and market:
                 if 2.0 <= time_left <= 6.0:
@@ -365,7 +408,6 @@ if __name__ == "__main__":
                         side  = "yes" if 93 <= y_ask <= 98 else "no"
                         price = y_ask if side == "yes" else n_ask
 
-                        # RSI filter
                         if side == "yes" and current_rsi < RSI_CRASH_LIMIT:
                             log(f"⏭️ Skipping YES: RSI={current_rsi} below crash limit {RSI_CRASH_LIMIT}.")
                         elif side == "no" and current_rsi > RSI_SURGE_LIMIT:
@@ -375,8 +417,10 @@ if __name__ == "__main__":
                                 min(MAX_POSITION_DOLLARS, cash * risk_decimal) * 100 // price
                             )
                             if qty >= 1:
-                                # Persist lock BEFORE API call
-                                state["pending_order"] = True
+                                # Generate order ID here so we can persist it before the API call
+                                pending_id = str(uuid.uuid4())
+                                state["pending_order"]    = True
+                                state["pending_order_id"] = pending_id   # FIX: persisted before call
                                 save_state(state)
                                 log(f"⚡ Entry: {side.upper()} @ {price}c x{qty} "
                                     f"| RSI={current_rsi} | {time_left:.1f}m left")
@@ -399,10 +443,11 @@ if __name__ == "__main__":
                                         log("❌ Entry order failed or unfilled.")
                                 finally:
                                     # Always release lock — even if place_order throws
-                                    state["pending_order"] = False
+                                    state["pending_order"]    = False
+                                    state["pending_order_id"] = None
                                     save_state(state)
 
-                                time.sleep(10)   # cooldown after entry attempt
+                                time.sleep(10)
 
             # --- Heartbeat ---
             trade_tag = f" [IN: {curr['side'].upper()}]" if curr else ""
@@ -418,7 +463,6 @@ if __name__ == "__main__":
 
         except Exception as e:
             log(f"⚠️ Loop Error: {e}")
-            # Safety net: release pending lock if top-level exception fires mid-entry
             try:
                 s = load_state()
                 if s["pending_order"]:
