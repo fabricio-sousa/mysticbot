@@ -100,7 +100,7 @@ def get_dynamic_risk() -> tuple[float, bool]:
         if 12.0 <= t < 16.0: return 0.10, True
         if 16.5 <= t < 17.5: return 0.15, True
     elif day == 6:
-        if 12.0 <= t < 17.0: return 0.05, True
+        if 12.0 <= t < 17.0: return 0.10, True
     return 0.01, False   # outside window → is_trading_window = False
 
 # ====================== TECHNICAL ANALYTICS ======================
@@ -162,7 +162,9 @@ def place_order(client, ticker: str, side: str, count: int,
 def sync_portfolio_to_state(client, state: dict):
     """Adopt any open KXBTC position that isn't tracked in state (e.g. after a crash)."""
     try:
-        positions = client.get_portfolio().positions
+        # NEW/FIXED
+        # The SDK returns a GetPositionsResponse which has a .positions attribute
+        positions = client.get_positions().positions    
         active    = next(
             (p for p in positions if "KXBTC" in p.ticker and p.position != 0), None
         )
