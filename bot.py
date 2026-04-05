@@ -101,29 +101,31 @@ client = KalshiClient(config)
 
 def place_order(ticker, side, count, action, price_cents=None):
     try:
-        pre_bal = client.get_balance().balance / 100.0
         order_id = str(uuid.uuid4())
         actual_limit = min(99, price_cents + MAX_SLIPPAGE) if action == "buy" else max(1, price_cents - MAX_SLIPPAGE)
         
-        client.create_order(ticker=ticker, side=side, action=action, count=count, type="limit", 
-                            client_order_id=order_id, yes_price=actual_limit if side=="yes" else None, 
-                            no_price=actual_limit if side=="no" else None)
+        # 1. Create order
+        resp = client.create_order(ticker=ticker, side=side, action=action, count=count, type="limit", 
+                                   client_order_id=order_id, yes_price=actual_limit if side=="yes" else None, 
+                                   no_price=actual_limit if side=="no" else None)
         
-        # Wait for fill and calculate ACTUAL entry price based on balance change
-        for _ in range(3):
+        # 2. Direct Polling for Actual Fill Data
+        for _ in range(5):
             time.sleep(1.5)
-            new_bal = client.get_balance().balance / 100.0
-            diff = abs(pre_bal - new_bal)
-            if diff >= 0.01:
-                # Calculate actual average price paid per contract
-                actual_avg_cents = int((diff / count) * 100) if count > 0 else price_cents
-                return True, actual_avg_cents
-        return False, price_cents
-    except Exception as e: log(f"❌ Order Error: {e}"); return False, price_cents
+            order_info = client.get_order(resp.order_id).order
+            if order_info.status == 'filled' or order_info.filled_count > 0:
+                # Return Success, Actual Avg Price, and Actual Quantity Filled
+                return True, order_info.avg_fill_price, order_info.filled_count
+            if order_info.status in ['canceled', 'expired']:
+                break
+        return False, 0, 0
+    except Exception as e: 
+        log(f"❌ Order Error: {e}")
+        return False, 0, 0
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log(f"🪄 Magick Bot v5.2.4 Active (Precision Stop Loss)")
+    log(f"🪄 Magick Bot v5.2.5 Active (Direct Feedback)")
     
     while True:
         try:
@@ -145,7 +147,6 @@ if __name__ == "__main__":
             if cash <= SAFETY_FLOOR or state.get("strikes", 0) >= STRIKE_LIMIT:
                 log(f"🚨 Shutdown: Cash ${cash:.2f} | Strikes {state.get('strikes')}"); break
 
-            # --- TICKER FETCH ---
             resp = client.get_markets(series_ticker="KXBTC15M", limit=5, status="open")
             markets = [m for m in getattr(resp, 'markets', []) if (m.close_time - now_et).total_seconds() > 0]
             
@@ -157,18 +158,16 @@ if __name__ == "__main__":
             else:
                 time_left = 0
 
-            # --- MONITORING / STOP LOSS (v5.2.4 Precision Fix) ---
+            # --- MONITORING / STOP LOSS ---
             if curr and curr.get("status") == "filled":
                 m_live = client.get_market(curr['ticker']).market
                 live_bid = safe_price_cents(m_live.yes_bid_dollars if curr['side'] == "yes" else m_live.no_bid_dollars)
-                # Use the ACTUAL price we paid for the SL calculation
-                entry_p = curr.get('actual_entry_price', curr['entry_price_cents'])
+                entry_p = curr['actual_entry_price']
                 stop_p = entry_p * (1 - STOP_LOSS_THRESHOLD)
 
-                # Only SL if current bid is below 40% of what we PAID and it's not a 'good fill' glitch
                 if 0 < live_bid <= stop_p and time_left > 0.5:
                     log(f"🚨 STOP LOSS: Selling {curr['ticker']} (Live: {live_bid}c | SL: {stop_p}c)")
-                    success, _ = place_order(curr['ticker'], curr['side'], curr['count'], "sell", live_bid)
+                    success, _, _ = place_order(curr['ticker'], curr['side'], curr['count'], "sell", live_bid)
                     if success:
                         pnl = (live_bid - entry_p) * curr['count'] / 100.0
                         update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "STOP_LOSS"})
@@ -177,7 +176,7 @@ if __name__ == "__main__":
                         save_state(state); play_sound("stop"); continue
 
             # --- HEARTBEAT ---
-            status_text = f" [IN: {curr['side'].upper()} @ {curr.get('actual_entry_price', '?')}c]" if curr else ""
+            status_text = f" [IN: {curr['side'].upper()} @ {curr.get('actual_entry_price')}c]" if curr else ""
             print(f"\r[{now_et.strftime('%H:%M:%S')}] Risk: {int(risk_decimal*100)}% | Cash: ${cash:.2f} | Session: ${SESSION_PNL:+.2f}{status_text}", end="")
 
             if not is_trading_window and not curr:
@@ -192,7 +191,7 @@ if __name__ == "__main__":
                 res = getattr(client.get_market(curr['ticker']).market, 'result', '').lower()
                 if res in ['yes', 'no']:
                     won = (curr['side'] == res)
-                    entry_p = curr.get('actual_entry_price', curr['entry_price_cents'])
+                    entry_p = curr['actual_entry_price']
                     pnl = (100 - entry_p) * curr['count'] / 100.0 if won else -(entry_p * curr['count'] / 100.0)
                     update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "SETTLEMENT"})
                     SESSION_PNL += pnl
@@ -201,24 +200,24 @@ if __name__ == "__main__":
                     state["current_trade"] = None; save_state(state)
                     play_sound("settle_win" if won else "settle_loss")
 
-            # --- ENTRY (93c Floor) ---
+            # --- ENTRY ---
             elif not curr and is_trading_window:
                 if 2.0 <= time_left <= 6.0 and (93 <= y_p <= 98 or 93 <= n_p <= 98):
                     side, price = ("yes", y_p) if 93 <= y_p <= 98 else ("no", n_p)
                     qty = int(min(MAX_POSITION_DOLLARS, (cash * risk_decimal)) * 100 // price)
                     if qty >= 1:
                         log(f"⚡ Pursuit: {side.upper()} @ {price}c (Qty: {qty})")
-                        success, actual_paid = place_order(market.ticker, side, qty, "buy", price)
-                        if success:
+                        success, actual_paid, filled_qty = place_order(market.ticker, side, qty, "buy", price)
+                        if success and filled_qty > 0:
                             state["current_trade"] = {
-                                "ticker": market.ticker, "side": side, "count": qty, 
-                                "entry_price_cents": price, "actual_entry_price": actual_paid, "status": "filled"
+                                "ticker": market.ticker, "side": side, "count": filled_qty, 
+                                "entry_price_cents": actual_paid, "actual_entry_price": actual_paid, "status": "filled"
                             }
                             save_state(state); play_sound("buy")
-                            log(f"✅ Filled at Avg: {actual_paid}c")
+                            log(f"✅ Filled: {filled_qty} contracts @ {actual_paid}c")
                             time.sleep(5)
                         else:
-                            log("⚠️ Entry failed. 15s Cooldown...")
+                            log("⚠️ Entry failed or zero fill. 15s Cooldown...")
                             time.sleep(15)
 
             time.sleep(1)
