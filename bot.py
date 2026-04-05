@@ -16,6 +16,7 @@ except ImportError:
     HAS_WINDOWS = False
 
 # ====================== CONFIG ======================
+# Uses relative paths so the repo works anywhere
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 APIKEY_FILE = os.path.join(BASE_DIR, "apikey.txt")
 PRIVATE_FILE = os.path.join(BASE_DIR, "private.txt")
@@ -31,10 +32,10 @@ STOP_LOSS_THRESHOLD = 0.40
 OVERRIDE_TRIGGERED = False
 SESSION_PNL = 0.00         
 
-# --- RSI GUARDRAIL SETTINGS ---
-RSI_MIN_FOR_YES = 35  # Skip YES if RSI < 35 (Too bearish)
-RSI_MAX_FOR_NO = 65   # Skip NO if RSI > 65 (Too bullish)
-RSI_FLOOR_FOR_NO = 40 # Skip NO if RSI < 40 (Bottomed out)
+# --- BINARY RSI GUARDRAILS (v5.2.7) ---
+RSI_PERIOD = 9        # More responsive for 15m windows
+RSI_CRASH_LIMIT = 30  # Skip YES if RSI < 30 (Avoid catching falling knives)
+RSI_SURGE_LIMIT = 70  # Skip NO if RSI > 70 (Avoid getting steamrolled by pumps)
 
 # ====================== DYNAMIC RISK ENGINE ======================
 def get_dynamic_risk():
@@ -58,26 +59,25 @@ def get_dynamic_risk():
 
 # ====================== TECHNICAL ANALYTICS ======================
 def get_btc_rsi():
-    """Fetches 1m BTC/USD RSI from Bitfinex Public API"""
+    """Fetches 1m BTC/USD RSI-9 from Bitfinex"""
     try:
-        # Fetch last 30 candles (1m) to calculate 14-period RSI
-        url = "https://api-pub.bitfinex.com/v2/candles/trade:1m:tBTCUSD/hist?limit=30"
+        url = f"https://api-pub.bitfinex.com/v2/candles/trade:1m:tBTCUSD/hist?limit={RSI_PERIOD + 10}"
         resp = requests.get(url, timeout=5).json()
-        closes = [c[2] for c in resp][::-1] # Close prices, chronologically
+        closes = [c[2] for c in resp][::-1] 
         
         deltas = [closes[i+1] - closes[i] for i in range(len(closes)-1)]
         gains = [d if d > 0 else 0 for d in deltas]
         losses = [-d if d < 0 else 0 for d in deltas]
         
-        avg_gain = sum(gains[-14:]) / 14
-        avg_loss = sum(losses[-14:]) / 14
+        avg_gain = sum(gains[-RSI_PERIOD:]) / RSI_PERIOD
+        avg_loss = sum(losses[-RSI_PERIOD:]) / RSI_PERIOD
         
         if avg_loss == 0: return 100
         rs = avg_gain / avg_loss
         return round(100 - (100 / (1  + rs)), 1)
     except Exception as e:
-        log(f"⚠️ RSI Fetch Error: {e}")
-        return 50.0 # Neutral fallback
+        log(f"⚠️ RSI Error: {e}")
+        return 50.0
 
 # ====================== HELPERS ======================
 def log(msg: str):
@@ -130,6 +130,7 @@ def place_order(ticker, side, count, action, price_cents=None):
         resp = client.create_order(ticker=ticker, side=side, action=action, count=count, type="limit", 
                                    client_order_id=order_id, yes_price=actual_limit if side=="yes" else None, 
                                    no_price=actual_limit if side=="no" else None)
+        # Direct Fill Feedback (v5.2.5 improvement)
         for _ in range(5):
             time.sleep(1.5)
             order_info = client.get_order(resp.order_id).order
@@ -142,7 +143,7 @@ def place_order(ticker, side, count, action, price_cents=None):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log(f"🪄 Magick Bot v5.2.6 Active (Sentinel RSI)")
+    log(f"🪄 Magick Bot v5.2.7 Active (Inverted Sentinel)")
     
     while True:
         try:
@@ -195,7 +196,7 @@ if __name__ == "__main__":
 
             # --- HEARTBEAT ---
             status_text = f" [IN: {curr['side'].upper()} @ {curr.get('actual_entry_price')}c]" if curr else ""
-            print(f"\r[{now_et.strftime('%H:%M:%S')}] RSI: {current_rsi} | Cash: ${cash:.2f} | PnL: ${SESSION_PNL:+.2f}{status_text}", end="")
+            print(f"\r[{now_et.strftime('%H:%M:%S')}] RSI-9: {current_rsi} | Cash: ${cash:.2f} | PnL: ${SESSION_PNL:+.2f}{status_text}", end="")
 
             if not is_trading_window and not curr:
                 time.sleep(10); continue
@@ -218,19 +219,16 @@ if __name__ == "__main__":
                     state["current_trade"] = None; save_state(state)
                     play_sound("settle_win" if won else "settle_loss")
 
-            # --- ENTRY WITH RSI GUARDRAILS ---
+            # --- ENTRY WITH CORRECTED RSI PROTECTION ---
             elif not curr and is_trading_window:
                 if 2.0 <= time_left <= 6.0 and (93 <= y_p <= 98 or 93 <= n_p <= 98):
                     side, price = ("yes", y_p) if 93 <= y_p <= 98 else ("no", n_p)
                     
-                    # Apply Guards
-                    if side == "yes" and current_rsi < RSI_MIN_FOR_YES:
-                        log(f"🛡️ Guard: Skipping YES (RSI {current_rsi} < {RSI_MIN_FOR_YES})"); time.sleep(15); continue
-                    if side == "no":
-                        if current_rsi > RSI_MAX_FOR_NO:
-                            log(f"🛡️ Guard: Skipping NO (RSI {current_rsi} > {RSI_MAX_FOR_NO})"); time.sleep(15); continue
-                        if current_rsi < RSI_FLOOR_FOR_NO:
-                            log(f"🛡️ Guard: Skipping NO (RSI {current_rsi} < {RSI_FLOOR_FOR_NO})"); time.sleep(15); continue
+                    # 🛡️ INVERTED RSI GUARDRAILS 🛡️
+                    if side == "yes" and current_rsi < RSI_CRASH_LIMIT:
+                        log(f"🛡️ Guard: Skip YES. RSI {current_rsi} < {RSI_CRASH_LIMIT} (Avoid Crash Risk)"); time.sleep(15); continue
+                    if side == "no" and current_rsi > RSI_SURGE_LIMIT:
+                        log(f"🛡️ Guard: Skip NO. RSI {current_rsi} > {RSI_SURGE_LIMIT} (Avoid Surge Risk)"); time.sleep(15); continue
 
                     qty = int(min(MAX_POSITION_DOLLARS, (cash * risk_decimal)) * 100 // price)
                     if qty >= 1:
