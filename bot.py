@@ -70,8 +70,7 @@ def get_btc_rsi():
         if avg_loss == 0: return 100
         rs = avg_gain / avg_loss
         return round(100 - (100 / (1  + rs)), 1)
-    except:
-        return 50.0
+    except: return 50.0
 
 # ====================== HELPERS ======================
 def log(msg: str):
@@ -118,27 +117,39 @@ config.private_key_pem = private_key_pem
 client = KalshiClient(config)
 
 def place_order(ticker, side, count, action, price_cents=None):
+    """Refined order placement with multi-attribute fill detection"""
     try:
         order_id = str(uuid.uuid4())
         actual_limit = min(99, price_cents + MAX_SLIPPAGE) if action == "buy" else max(1, price_cents - MAX_SLIPPAGE)
+        
+        # 1. Submit Order
         resp = client.create_order(ticker=ticker, side=side, action=action, count=count, type="limit", 
                                    client_order_id=order_id, yes_price=actual_limit if side=="yes" else None, 
                                    no_price=actual_limit if side=="no" else None)
         
-        # --- FIX 1: Correct access to order_id from response ---
+        # Check if response has order object
+        if not hasattr(resp, 'order'):
+            log(f"❌ Order failed at submission: {resp}")
+            return False, 0, 0
+            
         ex_id = resp.order.order_id 
         
-        for _ in range(5):
+        # 2. Poll for fill with multi-attribute support
+        for i in range(8): # Increased polling duration to 12s
             time.sleep(1.5)
             order_info = client.get_order(ex_id).order
             
-            # --- FIX 2: Check .status and .filled attribute ---
-            is_filled = getattr(order_info, 'status', '').lower() == 'filled'
-            filled_qty = getattr(order_info, 'filled', 0)
-            avg_price = getattr(order_info, 'avg_fill_price', 0)
+            # Check all possible attribute names for filling status
+            status = getattr(order_info, 'status', '').lower()
+            filled_qty = getattr(order_info, 'filled', getattr(order_info, 'filled_count', 0))
+            avg_price = getattr(order_info, 'avg_fill_price', getattr(order_info, 'avg_price', 0))
 
-            if is_filled or filled_qty > 0:
-                return True, avg_price, filled_qty
+            if status == 'filled' or filled_qty > 0:
+                # If avg_price is 0 (can happen on fast fills), fallback to requested price
+                final_price = avg_price if avg_price > 0 else price_cents
+                return True, final_price, filled_qty
+                
+        log(f"⚠️ Order {ex_id} not confirmed filled after 12s. Assuming failure.")
         return False, 0, 0
     except Exception as e: 
         log(f"❌ Order Error: {e}")
@@ -146,7 +157,7 @@ def place_order(ticker, side, count, action, price_cents=None):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log(f"🪄 Magick Bot v5.2.10 Active (Stable Sentinel)")
+    log(f"🪄 Magick Bot v5.2.11 Active (Ghost Fix)")
     
     while True:
         try:
@@ -157,8 +168,7 @@ if __name__ == "__main__":
 
             now_et = datetime.now(pytz.timezone("US/Eastern"))
             state = load_state()
-            balance_resp = client.get_balance()
-            cash = balance_resp.balance / 100.0
+            cash = client.get_balance().balance / 100.0
             curr = state.get("current_trade")
             risk_decimal, is_trading_window = get_dynamic_risk()
             current_rsi = get_btc_rsi()
@@ -212,8 +222,7 @@ if __name__ == "__main__":
             if curr and market.ticker != curr["ticker"]:
                 log(f"⏳ Finalizing {curr['ticker']}...")
                 time.sleep(35)
-                m_data = client.get_market(curr['ticker']).market
-                res = getattr(m_data, 'result', '').lower()
+                res = getattr(client.get_market(curr['ticker']).market, 'result', '').lower()
                 if res in ['yes', 'no']:
                     won = (curr['side'] == res)
                     entry_p = curr['actual_entry_price']
@@ -231,9 +240,9 @@ if __name__ == "__main__":
                     side, price = ("yes", y_p) if 93 <= y_p <= 98 else ("no", n_p)
                     
                     if side == "yes" and current_rsi < RSI_CRASH_LIMIT:
-                        log(f"🛡️ Guard: Skip YES (RSI {current_rsi} too low)"); time.sleep(15); continue
+                        log(f"🛡️ Guard: Skip YES (RSI {current_rsi} low)"); time.sleep(15); continue
                     if side == "no" and current_rsi > RSI_SURGE_LIMIT:
-                        log(f"🛡️ Guard: Skip NO (RSI {current_rsi} too high)"); time.sleep(15); continue
+                        log(f"🛡️ Guard: Skip NO (RSI {current_rsi} high)"); time.sleep(15); continue
 
                     qty = int(min(MAX_POSITION_DOLLARS, (cash * risk_decimal)) * 100 // price)
                     if qty >= 1:
@@ -248,7 +257,8 @@ if __name__ == "__main__":
                             log(f"✅ Filled: {filled_qty} contracts @ {actual_paid}c")
                             time.sleep(5)
                         else:
-                            time.sleep(15)
+                            # If we fail to confirm, wait longer to avoid double-buying
+                            time.sleep(20)
 
             time.sleep(1)
         except Exception as e: 
