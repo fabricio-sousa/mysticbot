@@ -21,8 +21,8 @@ STRATEGY_SCHEDULE = [
     {"days": "Mon-Fri", "range": range(0, 5), "start": 1200, "end": 1600, "time_str": "12:00pm–4:00pm", "risk": "10%", "label": "Balanced Midday"},
     {"days": "Mon-Fri", "range": range(0, 5), "start": 1630, "end": 1730, "time_str": "4:30pm–5:30pm", "risk": "15%", "label": "Primary Window"},
     {"days": "Mon-Fri", "range": range(0, 5), "start": 2200, "end": 2400, "time_str": "10:00pm–12:00am", "risk": "10%", "label": "Asian Open"},
-    {"days": "Mon-Fri", "range": range(0, 5), "start": 200, "end": 500, "time_str": "2:00am–5:00am", "risk": "15%", "label": "Safe Overnights"},
-    {"days": "Sunday", "range": [6], "start": 1200, "end": 1700, "time_str": "Sun 12pm–5pm", "risk": "10%", "label": "Weekend Transitional"}
+    {"days": "Mon-Fri", "range": range(0, 5), "start": 200, "end": 500, "time_str": "2:00am–5:00am", "risk": "5%", "label": "Safe Overnights"},
+    {"days": "Sunday", "range": [6], "start": 1200, "end": 1700, "time_str": "Sun 12pm–5pm", "risk": "5%", "label": "Weekend Transitional"}
 ]
 
 def get_current_window():
@@ -33,7 +33,7 @@ def get_current_window():
     for window in STRATEGY_SCHEDULE:
         if day in window.get("range", []) and window["start"] <= time_int < window["end"]:
             return window
-    return {"label": "Auto-Pilot (Passive)", "risk": "1%"}
+    return {"label": "Off-Hours", "risk": "1%"}
 
 def clean_val(value):
     if value is None or value == "": return 0.0
@@ -154,10 +154,10 @@ def index():
                         <span style="flex:1; text-align:right; color:#fff;">{{ s.label }}</span>
                     </div>
                     {% endfor %}
-                    <div class="row {% if window.label == 'Auto-Pilot (Passive)' %}current-row{% endif %}">
+                    <div class="row {% if window.label == 'Off-Hours' %}current-row{% endif %}">
                         <span style="color:#8b949e; min-width:110px;">Other Times</span>
                         <span style="color:var(--gold); width:40px;">1%</span>
-                        <span style="flex:1; text-align:right;">Auto-Pilot</span>
+                        <span style="flex:1; text-align:right;">Off-Hours</span>
                     </div>
                 </div>
             </div>
