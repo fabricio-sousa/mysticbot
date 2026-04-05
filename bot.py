@@ -33,8 +33,8 @@ SESSION_PNL = 0.00
 
 # --- RSI ---
 RSI_PERIOD      = 9
-RSI_CRASH_LIMIT = 30   # Skip YES entry if RSI too low (bearish momentum)
-RSI_SURGE_LIMIT = 70   # Skip NO  entry if RSI too high (bullish momentum)
+RSI_CRASH_LIMIT = 30
+RSI_SURGE_LIMIT = 70
 
 # ====================== DYNAMIC RISK ENGINE ======================
 def get_dynamic_risk():
@@ -44,16 +44,16 @@ def get_dynamic_risk():
     time_float = now.hour + (now.minute / 60.0)
 
     if 0 <= day <= 4:
-        if  0.0 <= time_float <  5.0: return 0.05, True   # Safe overnights
-        if  5.0 <= time_float <  8.5: return 0.05, True   # Low priority pre-market
-        if 10.5 <= time_float < 12.0: return 0.15, True   # High confidence open
-        if 12.0 <= time_float < 16.0: return 0.10, True   # Balanced midday
-        if 16.5 <= time_float < 17.5: return 0.15, True   # Primary close window
-        if 22.0 <= time_float < 24.0: return 0.05, True   # Asian open
+        if  0.0 <= time_float <  5.0: return 0.05, True
+        if  5.0 <= time_float <  8.5: return 0.05, True
+        if 10.5 <= time_float < 12.0: return 0.15, True
+        if 12.0 <= time_float < 16.0: return 0.10, True
+        if 16.5 <= time_float < 17.5: return 0.15, True
+        if 22.0 <= time_float < 24.0: return 0.05, True
     elif day == 6:
-        if 12.0 <= time_float < 17.0: return 0.05, True   # Sunday
+        if 12.0 <= time_float < 17.0: return 0.05, True
 
-    return 0.01, True   # Standby
+    return 0.01, True
 
 # ====================== RSI ======================
 def get_btc_rsi() -> float:
@@ -71,7 +71,7 @@ def get_btc_rsi() -> float:
         rs = avg_gain / avg_loss
         return round(100 - (100 / (1 + rs)), 1)
     except Exception:
-        return 50.0   # neutral fallback
+        return 50.0
 
 # ====================== HELPERS ======================
 def log(msg: str):
@@ -108,6 +108,25 @@ def play_sound(event_type):
     s = {"buy": [(2000, 200)], "settle_win": [(2500, 200), (3000, 200)], "settle_loss": [(600, 500)], "stop": [(400, 1000)]}
     for f, d in s.get(event_type, []): winsound.Beep(f, d)
 
+def parse_order(order) -> tuple[int, int]:
+    """
+    Extract (filled_qty, avg_price_cents) from an order object using
+    the correct SDK fields confirmed via debug:
+      - fill_count_fp:         string like '32.00' — number of contracts filled
+      - taker_fill_cost_dollars: string like '31.648000' — total cost in dollars
+    avg price = taker_fill_cost_dollars / fill_count_fp * 100 (to get cents)
+    Returns (0, 0) if unfilled.
+    """
+    try:
+        qty = int(float(getattr(order, 'fill_count_fp', '0') or '0'))
+        if qty <= 0:
+            return 0, 0
+        cost_dollars = float(getattr(order, 'taker_fill_cost_dollars', '0') or '0')
+        avg_cents = int(round((cost_dollars / qty) * 100)) if qty > 0 else 0
+        return qty, avg_cents
+    except Exception:
+        return 0, 0
+
 # ====================== API SETUP ======================
 with open(APIKEY_FILE, "r", encoding="utf-8") as f: api_key_id = f.read().strip()
 with open(PRIVATE_FILE, "r", encoding="utf-8") as f: private_key_pem = f.read()
@@ -129,23 +148,28 @@ def place_order(ticker, side, count, action, price_cents=None):
             no_price=actual_limit if side == "no" else None
         )
 
-        # Universal ID: handle both resp.order_id and resp.order.order_id
-        target_id = getattr(resp, 'order_id', None)
-        if not target_id and hasattr(resp, 'order'):
-            target_id = getattr(resp.order, 'order_id', None)
-        if not target_id:
-            log("❌ Order placed but could not retrieve ID for tracking.")
-            return False, 0, 0
+        order = resp.order
+        target_id = order.order_id
 
+        # Check if already filled in the create response (common for liquid markets)
+        qty, avg_cents = parse_order(order)
+        if qty > 0:
+            log(f"⚡ Instant fill detected in create response: {qty} @ {avg_cents}c")
+            return True, avg_cents, qty
+
+        # Not filled yet — poll for fill
         for _ in range(5):
             time.sleep(1.5)
             order_info = client.get_order(target_id).order
-            # Safe fill check: handle both filled_count and filled
-            f_qty = getattr(order_info, 'filled_count', getattr(order_info, 'filled', 0))
-            if order_info.status == 'filled' or f_qty > 0:
-                return True, order_info.avg_fill_price, f_qty
-            if order_info.status in ['canceled', 'expired']:
+            status = getattr(order_info, 'status', None)
+
+            qty, avg_cents = parse_order(order_info)
+            if qty > 0:
+                return True, avg_cents, qty
+            if status is not None and str(status).lower() in ['canceled', 'expired', 'orderStatus.canceled', 'orderStatus.expired']:
+                log(f"ℹ️ Order {target_id} {status} during polling.")
                 break
+
         return False, 0, 0
 
     except Exception as e:
@@ -154,7 +178,7 @@ def place_order(ticker, side, count, action, price_cents=None):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.2.7 Active (Universal ID + RSI)")
+    log("🪄 Magick Bot v5.2.8 Active (Correct Fill Detection)")
 
     while True:
         try:
@@ -244,7 +268,6 @@ if __name__ == "__main__":
                 if 2.0 <= time_left <= 6.0 and (93 <= y_p <= 98 or 93 <= n_p <= 98):
                     side, price = ("yes", y_p) if 93 <= y_p <= 98 else ("no", n_p)
 
-                    # RSI filter
                     if side == "yes" and current_rsi < RSI_CRASH_LIMIT:
                         log(f"⏭️ Skipping YES: RSI={current_rsi} below crash limit {RSI_CRASH_LIMIT}.")
                     elif side == "no" and current_rsi > RSI_SURGE_LIMIT:
