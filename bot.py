@@ -16,7 +16,6 @@ except ImportError:
     HAS_WINDOWS = False
 
 # ====================== CONFIG ======================
-# Uses relative paths so the repo works anywhere
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 APIKEY_FILE = os.path.join(BASE_DIR, "apikey.txt")
 PRIVATE_FILE = os.path.join(BASE_DIR, "private.txt")
@@ -32,10 +31,10 @@ STOP_LOSS_THRESHOLD = 0.40
 OVERRIDE_TRIGGERED = False
 SESSION_PNL = 0.00         
 
-# --- BINARY RSI GUARDRAILS (v5.2.7) ---
-RSI_PERIOD = 9        # More responsive for 15m windows
-RSI_CRASH_LIMIT = 30  # Skip YES if RSI < 30 (Avoid catching falling knives)
-RSI_SURGE_LIMIT = 70  # Skip NO if RSI > 70 (Avoid getting steamrolled by pumps)
+# --- BINARY RSI GUARDRAILS (v5.2.8) ---
+RSI_PERIOD = 9        # Fast response RSI-9
+RSI_CRASH_LIMIT = 30  # Skip YES if RSI < 30 (BTC dumping)
+RSI_SURGE_LIMIT = 70  # Skip NO if RSI > 70 (BTC mooning)
 
 # ====================== DYNAMIC RISK ENGINE ======================
 def get_dynamic_risk():
@@ -59,11 +58,12 @@ def get_dynamic_risk():
 
 # ====================== TECHNICAL ANALYTICS ======================
 def get_btc_rsi():
-    """Fetches 1m BTC/USD RSI-9 from Bitfinex"""
+    """Fetches 1m BTC/USD RSI-9 from Bitfinex Public API"""
     try:
+        # Bitfinex candle format: [MTS, OPEN, CLOSE, HIGH, LOW, VOL]
         url = f"https://api-pub.bitfinex.com/v2/candles/trade:1m:tBTCUSD/hist?limit={RSI_PERIOD + 10}"
         resp = requests.get(url, timeout=5).json()
-        closes = [c[2] for c in resp][::-1] 
+        closes = [c[2] for c in resp][::-1] # index 2 is close, [::-1] makes it chronological
         
         deltas = [closes[i+1] - closes[i] for i in range(len(closes)-1)]
         gains = [d if d > 0 else 0 for d in deltas]
@@ -130,10 +130,13 @@ def place_order(ticker, side, count, action, price_cents=None):
         resp = client.create_order(ticker=ticker, side=side, action=action, count=count, type="limit", 
                                    client_order_id=order_id, yes_price=actual_limit if side=="yes" else None, 
                                    no_price=actual_limit if side=="no" else None)
-        # Direct Fill Feedback (v5.2.5 improvement)
+        
+        # --- FIX: Access nested order_id ---
+        exchange_order_id = resp.order.order_id 
+        
         for _ in range(5):
             time.sleep(1.5)
-            order_info = client.get_order(resp.order_id).order
+            order_info = client.get_order(exchange_order_id).order
             if order_info.status == 'filled' or order_info.filled_count > 0:
                 return True, order_info.avg_fill_price, order_info.filled_count
         return False, 0, 0
@@ -143,7 +146,7 @@ def place_order(ticker, side, count, action, price_cents=None):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log(f"🪄 Magick Bot v5.2.7 Active (Inverted Sentinel)")
+    log(f"🪄 Magick Bot v5.2.8 Active (Sentinel Refined)")
     
     while True:
         try:
