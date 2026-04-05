@@ -40,20 +40,24 @@ RSI_SURGE_LIMIT = 70
 def get_dynamic_risk():
     tz = pytz.timezone("US/Eastern")
     now = datetime.now(tz)
-    day = now.weekday()
+    day = now.weekday()   # 0=Mon ... 5=Sat, 6=Sun
     time_float = now.hour + (now.minute / 60.0)
 
-    if 0 <= day <= 4:
-        if  0.0 <= time_float <  5.0: return 0.05, True
-        if  5.0 <= time_float <  8.5: return 0.05, True
-        if 10.5 <= time_float < 12.0: return 0.15, True
-        if 12.0 <= time_float < 16.0: return 0.10, True
-        if 16.5 <= time_float < 17.5: return 0.15, True
-        if 22.0 <= time_float < 24.0: return 0.05, True
-    elif day == 6:
-        if 12.0 <= time_float < 17.0: return 0.05, True
+    if 0 <= day <= 4:                                          # Monday - Friday
+        if  0.0 <= time_float <  5.0: return 0.03, True       # Overnight (raised from 1%)
+        if  5.0 <= time_float <  8.5: return 0.03, True       # Pre-market (raised from 1%)
+        if 10.5 <= time_float < 12.0: return 0.15, True       # High confidence open
+        if 12.0 <= time_float < 16.0: return 0.10, True       # Balanced midday
+        if 16.5 <= time_float < 17.5: return 0.15, True       # Primary close window
+        if 22.0 <= time_float < 24.0: return 0.03, True       # Asian open (raised from 1%)
 
-    return 0.01, True
+    elif day == 5:                                             # Saturday
+        if 10.0 <= time_float < 17.0: return 0.05, True       # Saturday daytime
+
+    elif day == 6:                                             # Sunday
+        if 12.0 <= time_float < 17.0: return 0.05, True       # Sunday afternoon
+
+    return 0.01, True   # Standby - all other hours, minimal size
 
 # ====================== RSI ======================
 def get_btc_rsi() -> float:
