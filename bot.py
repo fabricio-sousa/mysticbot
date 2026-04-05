@@ -32,9 +32,9 @@ OVERRIDE_TRIGGERED = False
 SESSION_PNL = 0.00         
 
 # --- BINARY RSI GUARDRAILS ---
-RSI_PERIOD = 9        # Responsive RSI-9
-RSI_CRASH_LIMIT = 30  # Skip YES if RSI < 30
-RSI_SURGE_LIMIT = 70  # Skip NO if RSI > 70
+RSI_PERIOD = 9        
+RSI_CRASH_LIMIT = 30  
+RSI_SURGE_LIMIT = 70  
 
 # ====================== DYNAMIC RISK ENGINE ======================
 def get_dynamic_risk():
@@ -45,7 +45,6 @@ def get_dynamic_risk():
     minute = now.minute
     time_float = hour + (minute / 60.0)
 
-    # 0=Mon, 4=Fri
     if 0 <= day <= 4:
         if 0.0 <= time_float < 5.0: return 0.05, True
         if 5.0 <= time_float < 8.5: return 0.05, True
@@ -53,30 +52,25 @@ def get_dynamic_risk():
         if 12.0 <= time_float < 16.0: return 0.10, True
         if 16.5 <= time_float < 17.5: return 0.15, True
         if 22.0 <= time_float < 24.0: return 0.05, True
-    elif day == 6: # Sunday
+    elif day == 6:
         if 12.0 <= time_float < 17.0: return 0.05, True
     return 0.01, True
 
 # ====================== TECHNICAL ANALYTICS ======================
 def get_btc_rsi():
-    """Fetches 1m BTC/USD RSI-9 from Bitfinex"""
     try:
         url = f"https://api-pub.bitfinex.com/v2/candles/trade:1m:tBTCUSD/hist?limit={RSI_PERIOD + 10}"
         resp = requests.get(url, timeout=5).json()
         closes = [c[2] for c in resp][::-1] 
-        
         deltas = [closes[i+1] - closes[i] for i in range(len(closes)-1)]
         gains = [d if d > 0 else 0 for d in deltas]
         losses = [-d if d < 0 else 0 for d in deltas]
-        
         avg_gain = sum(gains[-RSI_PERIOD:]) / RSI_PERIOD
         avg_loss = sum(losses[-RSI_PERIOD:]) / RSI_PERIOD
-        
         if avg_loss == 0: return 100
         rs = avg_gain / avg_loss
         return round(100 - (100 / (1  + rs)), 1)
-    except Exception as e:
-        log(f"⚠️ RSI Error: {e}")
+    except:
         return 50.0
 
 # ====================== HELPERS ======================
@@ -131,14 +125,20 @@ def place_order(ticker, side, count, action, price_cents=None):
                                    client_order_id=order_id, yes_price=actual_limit if side=="yes" else None, 
                                    no_price=actual_limit if side=="no" else None)
         
-        # Fixed attribute access
-        exchange_order_id = resp.order.order_id 
+        # --- FIX 1: Correct access to order_id from response ---
+        ex_id = resp.order.order_id 
         
         for _ in range(5):
             time.sleep(1.5)
-            order_info = client.get_order(exchange_order_id).order
-            if order_info.status == 'filled' or order_info.filled_count > 0:
-                return True, order_info.avg_fill_price, order_info.filled_count
+            order_info = client.get_order(ex_id).order
+            
+            # --- FIX 2: Check .status and .filled attribute ---
+            is_filled = getattr(order_info, 'status', '').lower() == 'filled'
+            filled_qty = getattr(order_info, 'filled', 0)
+            avg_price = getattr(order_info, 'avg_fill_price', 0)
+
+            if is_filled or filled_qty > 0:
+                return True, avg_price, filled_qty
         return False, 0, 0
     except Exception as e: 
         log(f"❌ Order Error: {e}")
@@ -146,7 +146,7 @@ def place_order(ticker, side, count, action, price_cents=None):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log(f"🪄 Magick Bot v5.2.9 Active (Risk-Aware Sentinel)")
+    log(f"🪄 Magick Bot v5.2.10 Active (Stable Sentinel)")
     
     while True:
         try:
@@ -157,7 +157,8 @@ if __name__ == "__main__":
 
             now_et = datetime.now(pytz.timezone("US/Eastern"))
             state = load_state()
-            cash = client.get_balance().balance / 100.0
+            balance_resp = client.get_balance()
+            cash = balance_resp.balance / 100.0
             curr = state.get("current_trade")
             risk_decimal, is_trading_window = get_dynamic_risk()
             current_rsi = get_btc_rsi()
@@ -197,7 +198,7 @@ if __name__ == "__main__":
                         state["current_trade"] = None; state["strikes"] += 1
                         save_state(state); play_sound("stop"); continue
 
-            # --- UPDATED HEARTBEAT (Shows Risk %) ---
+            # --- HEARTBEAT ---
             status_text = f" [IN: {curr['side'].upper()} @ {curr.get('actual_entry_price')}c]" if curr else ""
             risk_pct = int(risk_decimal * 100)
             print(f"\r[{now_et.strftime('%H:%M:%S')}] RSI-9: {current_rsi} | Risk: {risk_pct}% | Cash: ${cash:.2f} | PnL: ${SESSION_PNL:+.2f}{status_text}", end="")
@@ -211,7 +212,8 @@ if __name__ == "__main__":
             if curr and market.ticker != curr["ticker"]:
                 log(f"⏳ Finalizing {curr['ticker']}...")
                 time.sleep(35)
-                res = getattr(client.get_market(curr['ticker']).market, 'result', '').lower()
+                m_data = client.get_market(curr['ticker']).market
+                res = getattr(m_data, 'result', '').lower()
                 if res in ['yes', 'no']:
                     won = (curr['side'] == res)
                     entry_p = curr['actual_entry_price']
@@ -229,9 +231,9 @@ if __name__ == "__main__":
                     side, price = ("yes", y_p) if 93 <= y_p <= 98 else ("no", n_p)
                     
                     if side == "yes" and current_rsi < RSI_CRASH_LIMIT:
-                        log(f"🛡️ Guard: Skip YES. RSI {current_rsi} < {RSI_CRASH_LIMIT}"); time.sleep(15); continue
+                        log(f"🛡️ Guard: Skip YES (RSI {current_rsi} too low)"); time.sleep(15); continue
                     if side == "no" and current_rsi > RSI_SURGE_LIMIT:
-                        log(f"🛡️ Guard: Skip NO. RSI {current_rsi} > {RSI_SURGE_LIMIT}"); time.sleep(15); continue
+                        log(f"🛡️ Guard: Skip NO (RSI {current_rsi} too high)"); time.sleep(15); continue
 
                     qty = int(min(MAX_POSITION_DOLLARS, (cash * risk_decimal)) * 100 // price)
                     if qty >= 1:
