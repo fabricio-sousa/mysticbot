@@ -1,4 +1,4 @@
-# 🪄 Magick Bot v5.0.9
+# 🪄 Magick Bot (v5.2.4)
 
 Magick Bot is an automated algorithmic trading system optimized for the **Kalshi Bitcoin 15-Minute (KXBTC15M)** markets. It is designed to execute high-probability trades (94%-98% confidence) within specific time-of-day risk parameters.
 
@@ -17,7 +17,7 @@ To protect the bankroll, the bot includes several hard-coded safety mechanisms:
 
 1. **Safety Floor ($600):** If the total cash balance hits **$600.00**, the bot performs an emergency shutdown to preserve remaining capital.
 2. **Strike Limit (3):** Tracks consecutive losses. If the bot hits **3 losses in a row**, it shuts down to prevent "death spirals" during unpredictable market trends.
-3. **Position Cap ($500):** Regardless of risk percentage, no single trade will exceed **$500.00** in total cost.
+3. **Position Cap ($1000):** Regardless of risk percentage, no single trade will exceed **$1000.00** in total cost.
 4. **Slippage Buffer:** Uses a **2¢ slippage allowance** (`MAX_SLIPPAGE`) to ensure fills in fast-moving 15-minute windows.
 5. **Cooldown Timer:** Enforces a 5-second "breathe" period after every order exit before scanning for new opportunities.
 
@@ -27,14 +27,14 @@ The bot follows a strict ET-based risk profile:
 
 | Day | Time Window (ET) | Risk Level |
 | :--- | :--- | :--- |
-| **Mon - Fri** | 02:00 AM – 05:00 AM | **15%** (High Conviction) |
+| **Mon - Fri** | 02:00 AM – 05:00 AM | **5%** (High Conviction) |
 | **Mon - Fri** | 05:00 AM – 08:30 AM | **5%** (Conservative) |
 | **Mon - Fri** | 10:30 AM – 12:00 PM | **15%** (High Conviction) |
 | **Mon - Fri** | 12:00 PM – 04:00 PM | **10%** (Standard) |
 | **Mon - Fri** | 04:30 PM – 05:30 PM | **15%** (High Conviction) |
-| **Mon - Fri** | 10:00 PM – 12:00 AM | **10%** (Evening Scalp) |
+| **Mon - Fri** | 10:00 PM – 12:00 AM | **5%** (Evening Scalp) |
 | **Sunday** | 12:00 PM – 05:00 PM | **5%** (Weekend Entry) |
-| **Saturday** | All Day | **0%** (Market Dormant) |
+| **All Other Hours** | All Day | **1%** |
 
 ## 🛠️ Setup & Local Environment
 

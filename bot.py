@@ -22,76 +22,40 @@ LOG_FILE = os.path.join(BASE_DIR, "log.txt")
 STATE_FILE = os.path.join(BASE_DIR, "state.json")
 TRADES_FILE = os.path.join(BASE_DIR, "trades.json")
 
-# SECURITY CONSTANTS
 MAX_SLIPPAGE = 2 
-MAX_POSITION_DOLLARS = 500.0 # Increased to accommodate 15% allocations
-SAFETY_FLOOR = 600.0
+MAX_POSITION_DOLLARS = 500.0
+SAFETY_FLOOR = 1000.0
 STRIKE_LIMIT = 3
-LAST_ORDER_EXIT_TIME = 0 
+STOP_LOSS_THRESHOLD = 0.40 
 OVERRIDE_TRIGGERED = False
-TEST_MODE_TRIGGERED = False
-SESSION_PNL = 0.0
+SESSION_PNL = 0.00         
 
 # ====================== DYNAMIC RISK ENGINE ======================
 def get_dynamic_risk():
-    """Returns (risk_decimal, is_trading_hour) based on ET Schedule"""
     tz = pytz.timezone("US/Eastern")
     now = datetime.now(tz)
-    day = now.weekday() # 0=Mon, 6=Sun
+    day = now.weekday() # 0=Mon, 1=Tue, ..., 5=Sat, 6=Sun
     hour = now.hour
     minute = now.minute
     time_float = hour + (minute / 60.0)
 
-    # SATURDAY: No Trading
-    if day == 5:
-        return 0.0, False
+    # --- MONDAY through FRIDAY ---
+    if 0 <= day <= 4:
+        if 0.0 <= time_float < 5.0: return 0.05, True    # Safe Overnights (5%)
+        if 5.0 <= time_float < 8.5: return 0.05, True    # Safe / Low Priority (5%)
+        if 10.5 <= time_float < 12.0: return 0.15, True  # High Confidence (15%)
+        if 12.0 <= time_float < 16.0: return 0.10, True  # Balanced Midday (10%)
+        if 16.5 <= time_float < 17.5: return 0.15, True  # Primary Window (15%)
+        if 22.0 <= time_float < 24.0: return 0.05, True  # Asian Open (5%)
 
-    # SUNDAY
-    if day == 6:
-        if 12.0 <= time_float < 17.0: return 0.05, True
-        return 0.0, False
+    # --- SUNDAY ---
+    elif day == 6:
+        if 12.0 <= time_float < 17.0: return 0.05, True  # Sunday (5%)
 
-    # MONDAY - FRIDAY
-    # 2:00am to 5:00am: 15%
-    if 2.0 <= time_float < 5.0: return 0.15, True
-    # 5:00am to 8:30am: 5%
-    if 5.0 <= time_float < 8.5: return 0.05, True
-    # 10:30am to 12:00pm: 15%
-    if 10.5 <= time_float < 12.0: return 0.15, True
-    # 12:00pm to 4:00pm: 10%
-    if 12.0 <= time_float < 16.0: return 0.10, True
-    # 4:30pm to 5:30pm: 15%
-    if 16.5 <= time_float < 17.5: return 0.15, True
-    # 10:00pm to 12:00am: 10%
-    if 22.0 <= time_float < 24.0: return 0.10, True
-
-    return 0.0, False
-
-# ====================== STARTUP ======================
-with open(APIKEY_FILE, "r", encoding="utf-8") as f: api_key_id = f.read().strip()
-with open(PRIVATE_FILE, "r", encoding="utf-8") as f: private_key_pem = f.read()
-
-config = Configuration(host="https://api.elections.kalshi.com/trade-api/v2")
-config.api_key_id = api_key_id
-config.private_key_pem = private_key_pem
-client = KalshiClient(config)
+    # --- STANDBY MODE (24/7) ---
+    return 0.01, True
 
 # ====================== HELPERS ======================
-def save_trade_to_history(trade_data):
-    history = []
-    if os.path.exists(TRADES_FILE):
-        with open(TRADES_FILE, "r", encoding="utf-8") as f:
-            try: history = json.load(f)
-            except: history = []
-    history.append(trade_data)
-    with open(TRADES_FILE, "w", encoding="utf-8") as f:
-        json.dump(history, f, indent=2)
-
-def play_sound(event_type):
-    if not HAS_WINDOWS: return
-    s = {"buy":[(2000,200)], "settle_win":[(2500,200),(3000,200)], "settle_loss":[(600,500)]}
-    for f, d in s.get(event_type, []): winsound.Beep(f, d)
-
 def log(msg: str):
     ts = datetime.now(pytz.timezone("US/Eastern")).strftime("%Y-%m-%d %H:%M:%S ET")
     print(f"\n[{ts}] {msg}")
@@ -107,123 +71,157 @@ def load_state():
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f: json.dump(state, f, indent=2)
 
-def check_keys():
-    global OVERRIDE_TRIGGERED, TEST_MODE_TRIGGERED
-    if HAS_WINDOWS and msvcrt.kbhit():
-        key = msvcrt.getch()
-        if key == b'\x1b': os._exit(0) # ESC
-        elif key.lower() == b'c': OVERRIDE_TRIGGERED = True
-        elif key == b'1': TEST_MODE_TRIGGERED = True
+def update_trades_json(trade_entry):
+    trades = []
+    trade_entry["category"] = "bot"
+    if os.path.exists(TRADES_FILE):
+        with open(TRADES_FILE, "r") as f:
+            try: trades = json.load(f)
+            except: trades = []
+    trades.append(trade_entry)
+    with open(TRADES_FILE, "w") as f: json.dump(trades, f, indent=2)
 
 def safe_price_cents(value) -> int:
     try: return int(round(float(value or 0) * 100))
     except: return 0
 
-# ====================== EXECUTION ======================
-def place_order(ticker, side, count, action, price_cents=None, is_test=False):
-    global LAST_ORDER_EXIT_TIME
+def play_sound(event_type):
+    if not HAS_WINDOWS: return
+    s = {"buy":[(2000,200)], "settle_win":[(2500,200),(3000,200)], "settle_loss":[(600,500)], "stop":[(400,1000)]}
+    for f, d in s.get(event_type, []): winsound.Beep(f, d)
+
+# ====================== API SETUP ======================
+with open(APIKEY_FILE, "r", encoding="utf-8") as f: api_key_id = f.read().strip()
+with open(PRIVATE_FILE, "r", encoding="utf-8") as f: private_key_pem = f.read()
+
+config = Configuration(host="https://api.elections.kalshi.com/trade-api/v2")
+config.api_key_id = api_key_id
+config.private_key_pem = private_key_pem
+client = KalshiClient(config)
+
+def place_order(ticker, side, count, action, price_cents=None):
     try:
         pre_bal = client.get_balance().balance / 100.0
         order_id = str(uuid.uuid4())
-        slip = 5 if is_test else MAX_SLIPPAGE
-        ceiling = 100 if is_test else 98
-        actual_price = min(ceiling, price_cents + slip) if action == "buy" else max(1, price_cents - slip)
+        actual_limit = min(99, price_cents + MAX_SLIPPAGE) if action == "buy" else max(1, price_cents - MAX_SLIPPAGE)
         
         client.create_order(ticker=ticker, side=side, action=action, count=count, type="limit", 
-                            client_order_id=order_id, yes_price=actual_price if side=="yes" else None, 
-                            no_price=actual_price if side=="no" else None)
+                            client_order_id=order_id, yes_price=actual_limit if side=="yes" else None, 
+                            no_price=actual_limit if side=="no" else None)
         
+        # Wait for fill and calculate ACTUAL entry price based on balance change
         for _ in range(3):
-            time.sleep(1)
-            if (pre_bal - (client.get_balance().balance / 100.0)) >= 0.01: return True 
-        try: client.cancel_order(order_id)
-        except: pass
-        LAST_ORDER_EXIT_TIME = time.time()
-        return False
-    except Exception as e:
-        log(f"❌ Error: {e}"); return False
+            time.sleep(1.5)
+            new_bal = client.get_balance().balance / 100.0
+            diff = abs(pre_bal - new_bal)
+            if diff >= 0.01:
+                # Calculate actual average price paid per contract
+                actual_avg_cents = int((diff / count) * 100) if count > 0 else price_cents
+                return True, actual_avg_cents
+        return False, price_cents
+    except Exception as e: log(f"❌ Order Error: {e}"); return False, price_cents
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.0.9 Starting (Strategic Allocation Mode)")
-    st = load_state(); st["current_trade"] = None; save_state(st)
+    log(f"🪄 Magick Bot v5.2.4 Active (Precision Stop Loss)")
     
     while True:
         try:
-            check_keys()
+            if HAS_WINDOWS and msvcrt.kbhit():
+                key = msvcrt.getch()
+                if key == b'\x1b': os._exit(0)
+                elif key.lower() == b'c': OVERRIDE_TRIGGERED = True
+
             now_et = datetime.now(pytz.timezone("US/Eastern"))
             state = load_state()
             cash = client.get_balance().balance / 100.0
-            strikes = state.get("strikes", 0)
-            
-            # Risk Logic
+            curr = state.get("current_trade")
             risk_decimal, is_trading_window = get_dynamic_risk()
 
             if OVERRIDE_TRIGGERED:
-                log("🛠️ Manual Override: Clearing State")
-                state["current_trade"] = None; save_state(state); OVERRIDE_TRIGGERED = False
+                log("🛠️ Manual Override: Clearing State"); state["current_trade"] = None
+                save_state(state); OVERRIDE_TRIGGERED = False
 
-            if cash <= SAFETY_FLOOR or strikes >= STRIKE_LIMIT:
-                log(f"🚨 Shutdown: Cash ${cash:.2f} | Strikes {strikes}"); break
-                
-            if time.time() - LAST_ORDER_EXIT_TIME < 5:
-                time.sleep(1); continue
+            if cash <= SAFETY_FLOOR or state.get("strikes", 0) >= STRIKE_LIMIT:
+                log(f"🚨 Shutdown: Cash ${cash:.2f} | Strikes {state.get('strikes')}"); break
+
+            # --- TICKER FETCH ---
+            resp = client.get_markets(series_ticker="KXBTC15M", limit=5, status="open")
+            markets = [m for m in getattr(resp, 'markets', []) if (m.close_time - now_et).total_seconds() > 0]
+            
+            if markets:
+                markets.sort(key=lambda x: x.close_time)
+                market = markets[0]
+                time_left = (market.close_time - now_et).total_seconds() / 60.0
+                y_p, n_p = safe_price_cents(market.yes_bid_dollars), safe_price_cents(market.no_bid_dollars)
+            else:
+                time_left = 0
+
+            # --- MONITORING / STOP LOSS (v5.2.4 Precision Fix) ---
+            if curr and curr.get("status") == "filled":
+                m_live = client.get_market(curr['ticker']).market
+                live_bid = safe_price_cents(m_live.yes_bid_dollars if curr['side'] == "yes" else m_live.no_bid_dollars)
+                # Use the ACTUAL price we paid for the SL calculation
+                entry_p = curr.get('actual_entry_price', curr['entry_price_cents'])
+                stop_p = entry_p * (1 - STOP_LOSS_THRESHOLD)
+
+                # Only SL if current bid is below 40% of what we PAID and it's not a 'good fill' glitch
+                if 0 < live_bid <= stop_p and time_left > 0.5:
+                    log(f"🚨 STOP LOSS: Selling {curr['ticker']} (Live: {live_bid}c | SL: {stop_p}c)")
+                    success, _ = place_order(curr['ticker'], curr['side'], curr['count'], "sell", live_bid)
+                    if success:
+                        pnl = (live_bid - entry_p) * curr['count'] / 100.0
+                        update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "STOP_LOSS"})
+                        SESSION_PNL += pnl
+                        state["current_trade"] = None; state["strikes"] += 1
+                        save_state(state); play_sound("stop"); continue
 
             # --- HEARTBEAT ---
-            risk_label = f"{int(risk_decimal*100)}%" if is_trading_window else "DORMANT"
-            status_text = ""
-            curr = state.get("current_trade")
-            if curr:
-                status_text = f" [IN TRADE: {curr['side'].upper()}]" if curr.get('status') != 'pending' else " [PENDING...]"
-            
-            # Simplified ticker fetch for heartbeat
-            print(f"\r[{now_et.strftime('%H:%M:%S')}] Risk: {risk_label} | Cash: ${cash:.2f} | Session: ${SESSION_PNL:+.2f}{status_text}", end="")
+            status_text = f" [IN: {curr['side'].upper()} @ {curr.get('actual_entry_price', '?')}c]" if curr else ""
+            print(f"\r[{now_et.strftime('%H:%M:%S')}] Risk: {int(risk_decimal*100)}% | Cash: ${cash:.2f} | Session: ${SESSION_PNL:+.2f}{status_text}", end="")
 
             if not is_trading_window and not curr:
                 time.sleep(10); continue
+            if not markets:
+                time.sleep(5); continue
 
-            resp = client.get_markets(series_ticker="KXBTC15M", limit=5, status="open")
-            markets = [m for m in getattr(resp, 'markets', []) if (m.close_time - now_et).total_seconds() > 0]
-            if not markets: time.sleep(5); continue
-            markets.sort(key=lambda x: x.close_time); market = markets[0]
-
-            y_p = safe_price_cents(market.yes_bid_dollars)
-            n_p = safe_price_cents(market.no_bid_dollars)
-            time_left = (market.close_time - now_et).total_seconds() / 60.0
-
-            # 1. SETTLEMENT
-            if curr and isinstance(curr, dict) and curr.get("status") != "pending" and market.ticker != curr["ticker"]:
+            # --- SETTLEMENT CHECK ---
+            if curr and market.ticker != curr["ticker"]:
                 log(f"⏳ Finalizing {curr['ticker']}...")
-                time.sleep(35) 
-                m_info = client.get_market(curr['ticker']).market
-                res = getattr(m_info, 'result', '').lower()
+                time.sleep(35)
+                res = getattr(client.get_market(curr['ticker']).market, 'result', '').lower()
                 if res in ['yes', 'no']:
                     won = (curr['side'] == res)
-                    pnl = (100 - curr['entry_price_cents']) * curr['count'] / 100.0 if won else - (curr['entry_price_cents'] * curr['count'] / 100.0)
+                    entry_p = curr.get('actual_entry_price', curr['entry_price_cents'])
+                    pnl = (100 - entry_p) * curr['count'] / 100.0 if won else -(entry_p * curr['count'] / 100.0)
+                    update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "SETTLEMENT"})
                     SESSION_PNL += pnl
                     log(f"🏁 RESULT: {res.upper()} | {'WIN' if won else 'LOSS'} | PnL: ${pnl:+.2f}")
-                    save_trade_to_history({
-                        "timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr["ticker"],
-                        "side": curr["side"], "entry": curr["entry_price_cents"], "exit": 100 if won else 0,
-                        "qty": curr["count"], "pnl": round(pnl, 2), "result": "WIN" if won else "LOSS"
-                    })
-                    state["strikes"] = 0 if won else strikes + 1
+                    state["strikes"] = 0 if won else state.get("strikes", 0) + 1
                     state["current_trade"] = None; save_state(state)
-                    if won: play_sound("settle_win")
-                    else: play_sound("settle_loss")
+                    play_sound("settle_win" if won else "settle_loss")
 
-            # 2. ENTRY (Only if in Window)
+            # --- ENTRY (93c Floor) ---
             elif not curr and is_trading_window:
-                if 1.5 <= time_left <= 6.0 and (94 <= y_p <= 98 or 94 <= n_p <= 98):
-                    side, price = ("yes", y_p) if 94 <= y_p <= 98 else ("no", n_p)
+                if 2.0 <= time_left <= 6.0 and (93 <= y_p <= 98 or 93 <= n_p <= 98):
+                    side, price = ("yes", y_p) if 93 <= y_p <= 98 else ("no", n_p)
                     qty = int(min(MAX_POSITION_DOLLARS, (cash * risk_decimal)) * 100 // price)
                     if qty >= 1:
-                        state["current_trade"] = {"ticker": market.ticker, "status": "pending"}; save_state(state)
-                        log(f"⚡ Pursuit: {side.upper()} @ {price}c (Risk: {risk_label}, Qty: {qty})")
-                        if place_order(market.ticker, side, qty, "buy", price):
-                            state["current_trade"] = {"ticker": market.ticker, "side": side, "count": qty, "entry_price_cents": price}
+                        log(f"⚡ Pursuit: {side.upper()} @ {price}c (Qty: {qty})")
+                        success, actual_paid = place_order(market.ticker, side, qty, "buy", price)
+                        if success:
+                            state["current_trade"] = {
+                                "ticker": market.ticker, "side": side, "count": qty, 
+                                "entry_price_cents": price, "actual_entry_price": actual_paid, "status": "filled"
+                            }
                             save_state(state); play_sound("buy")
-                        else: state["current_trade"] = None; save_state(state)
+                            log(f"✅ Filled at Avg: {actual_paid}c")
+                            time.sleep(5)
+                        else:
+                            log("⚠️ Entry failed. 15s Cooldown...")
+                            time.sleep(15)
 
-            time.sleep(1) 
-        except Exception as e: time.sleep(5)
+            time.sleep(1)
+        except Exception as e: 
+            log(f"⚠️ Loop Error: {e}")
+            time.sleep(5)
