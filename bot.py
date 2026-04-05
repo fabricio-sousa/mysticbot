@@ -23,17 +23,34 @@ SAFETY_FLOOR         = 1000.0
 STRIKE_LIMIT         = 3
 STOP_LOSS_THRESHOLD  = 0.40
 
-# Entry window: only enter if this many minutes remain on the contract.
-# Floor must exceed polling window + overhead so the market doesn't
-# expire while we're still waiting for a fill.
-# 25 polls × 2s + ~30s overhead = ~80s ≈ 1.4 min → use 3.0 min as safe floor.
-ENTRY_TIME_MIN = 3.0   # minutes remaining — don't enter below this
-ENTRY_TIME_MAX = 6.0   # minutes remaining — don't enter above this
+# Entry window: floor must give enough room for polling + overhead.
+# 5 polls × 1.5s + overhead ≈ 30s — 3.0 min is a safe floor.
+ENTRY_TIME_MIN = 3.0
+ENTRY_TIME_MAX = 6.0
 
 # --- RSI ---
 RSI_PERIOD      = 9
-RSI_CRASH_LIMIT = 30
-RSI_SURGE_LIMIT = 70
+RSI_CRASH_LIMIT = 30   # Skip YES entry if RSI too low (bearish momentum)
+RSI_SURGE_LIMIT = 70   # Skip NO  entry if RSI too high (bullish momentum)
+
+# ====================== DYNAMIC RISK ENGINE ======================
+def get_dynamic_risk() -> tuple[float, bool]:
+    tz  = pytz.timezone("US/Eastern")
+    now = datetime.now(tz)
+    day = now.weekday()   # 0=Mon … 5=Sat, 6=Sun
+    t   = now.hour + now.minute / 60.0
+
+    if 0 <= day <= 4:                          # Monday – Friday
+        if  0.0 <= t <  5.0: return 0.05, True  # Safe overnights
+        if  5.0 <= t <  8.5: return 0.05, True  # Low priority pre-market
+        if 10.5 <= t < 12.0: return 0.15, True  # High confidence open
+        if 12.0 <= t < 16.0: return 0.10, True  # Balanced midday
+        if 16.5 <= t < 17.5: return 0.15, True  # Primary close window
+        if 22.0 <= t < 24.0: return 0.05, True  # Asian open
+    elif day == 6:                             # Sunday
+        if 12.0 <= t < 17.0: return 0.05, True
+
+    return 0.01, True   # Standby — still active, minimum size
 
 # ====================== HELPERS ======================
 def log(msg: str):
@@ -97,34 +114,6 @@ def play_sound(event_type: str):
     for freq, dur in sounds.get(event_type, []):
         winsound.Beep(freq, dur)
 
-def cancel_order_safe(client, ex_id: str):
-    """
-    Cancel an order, handling 404 gracefully.
-    404 means Kalshi already cleaned it up — not an error worth alerting on.
-    """
-    try:
-        client.cancel_order(ex_id)
-        log(f"🚫 Order {ex_id} cancelled successfully.")
-    except Exception as ce:
-        if "404" in str(ce):
-            log(f"ℹ️ Order {ex_id} already closed/cancelled by Kalshi — no action needed.")
-        else:
-            log(f"⚠️ Cancel failed for {ex_id}: {ce} — verify on Kalshi manually.")
-
-# ====================== DYNAMIC RISK ENGINE ======================
-def get_dynamic_risk() -> tuple[float, bool]:
-    tz  = pytz.timezone("US/Eastern")
-    now = datetime.now(tz)
-    day = now.weekday()
-    t   = now.hour + now.minute / 60.0
-    if 0 <= day <= 4:
-        if 10.5 <= t < 12.0: return 0.15, True
-        if 12.0 <= t < 16.0: return 0.10, True
-        if 16.5 <= t < 17.5: return 0.15, True
-    elif day == 6:
-        if 12.0 <= t < 17.0: return 0.05, True
-    return 0.01, False
-
 # ====================== TECHNICAL ANALYTICS ======================
 def get_btc_rsi() -> float:
     try:
@@ -141,69 +130,93 @@ def get_btc_rsi() -> float:
         rs = avg_gain / avg_loss
         return round(100 - (100 / (1 + rs)), 1)
     except Exception:
-        return 50.0
+        return 50.0   # neutral fallback
 
 # ====================== ORDER ENGINE ======================
+def cancel_order_safe(client, ex_id: str) -> tuple[int, int]:
+    """
+    Cancel an order and return (filled_qty, avg_price_cents).
+    On 404: checks actual fill status first — a filled+settled order
+    also returns 404 on cancel, so we can't assume it's clean.
+    Returns (0, 0) if confirmed unfilled, (qty, price) if a fill is found.
+    """
+    try:
+        client.cancel_order(ex_id)
+        log(f"🚫 Order {ex_id} cancelled successfully.")
+        return 0, 0
+    except Exception as ce:
+        if "404" in str(ce):
+            # Ambiguous: could be expired/unfilled OR filled+settled.
+            # Always verify before treating as a no-op.
+            try:
+                order = client.get_order(ex_id).order
+                qty   = getattr(order, "filled_count", getattr(order, "filled", 0))
+                avg   = getattr(order, "avg_fill_price", 0)
+                if qty > 0:
+                    log(f"⚠️ Order {ex_id} was filled ({qty} @ {avg}c) before cancel — recovering as late fill.")
+                    return qty, (avg if avg > 0 else 0)
+                else:
+                    log(f"ℹ️ Order {ex_id} confirmed unfilled and expired by Kalshi.")
+                    return 0, 0
+            except Exception as e2:
+                log(f"⚠️ Could not verify fill status for {ex_id} after 404: {e2} — manual review needed.")
+                return 0, 0
+        else:
+            log(f"⚠️ Cancel failed for {ex_id}: {ce} — verify on Kalshi manually.")
+            return 0, 0
+
 def place_order(client, ticker: str, side: str, count: int,
                 action: str, price_cents: int) -> tuple[bool, int, int]:
     """
-    Submit a limit order and poll until filled or timeout.
-    On timeout: runs a final fill check, then cancels to prevent ghost fills.
-    On hard API error (e.g. 404): applies a 10s cooldown before returning
-    so the entry lock isn't released instantly and re-triggered next tick.
+    Submit a limit order and poll until filled, expired, or timeout.
+    Uses v5.2.5 direct status fields (order.status, order.filled_count,
+    order.avg_fill_price) for clean fill detection.
+    On timeout: verifies fill via cancel_order_safe to catch late fills.
     Returns (success, actual_price_cents, filled_qty).
     """
     ex_id = None
     try:
-        order_id = str(uuid.uuid4())
-        limit    = min(99, price_cents + MAX_SLIPPAGE) if action == "buy" \
-                   else max(1, price_cents - MAX_SLIPPAGE)
+        order_id     = str(uuid.uuid4())
+        actual_limit = min(99, price_cents + MAX_SLIPPAGE) if action == "buy" \
+                       else max(1, price_cents - MAX_SLIPPAGE)
 
         resp  = client.create_order(
             ticker=ticker, side=side, action=action, count=count,
             type="limit", client_order_id=order_id,
-            yes_price=limit if side == "yes" else None,
-            no_price =limit if side == "no"  else None,
+            yes_price=actual_limit if side == "yes" else None,
+            no_price =actual_limit if side == "no"  else None,
         )
         ex_id = resp.order.order_id
 
-        # 25 × 2s = 50s polling window
-        for _ in range(25):
-            time.sleep(2)
-            order = client.get_order(ex_id).order
-            qty   = getattr(order, "filled", 0)
-            if qty > 0:
-                avg = getattr(order, "avg_fill_price", 0)
+        # Poll using direct status fields (v5.2.5 approach — clean and reliable)
+        for _ in range(5):
+            time.sleep(1.5)
+            order_info = client.get_order(ex_id).order
+            filled_qty = getattr(order_info, "filled_count", getattr(order_info, "filled", 0))
+            status     = getattr(order_info, "status", "").lower()
+
+            if status == "filled" or filled_qty > 0:
+                avg = getattr(order_info, "avg_fill_price", 0)
                 if avg == 0:
                     log("⚠️ avg_fill_price is 0 — using limit price as estimate. PnL may be slightly off.")
-                return True, (avg if avg > 0 else price_cents), qty
+                return True, (avg if avg > 0 else price_cents), filled_qty
 
-        # Final check: catch fills that landed just after the loop
-        log(f"⚠️ Order {ex_id} unfilled after polling window. Running final check...")
-        try:
-            final_order = client.get_order(ex_id).order
-            qty = getattr(final_order, "filled", 0)
-            if qty > 0:
-                avg = getattr(final_order, "avg_fill_price", 0)
-                if avg == 0:
-                    log("⚠️ Late fill: avg_fill_price is 0 — using limit price as estimate.")
-                log(f"⚠️ Late fill detected: {qty} contracts @ {avg if avg > 0 else price_cents}c")
-                return True, (avg if avg > 0 else price_cents), qty
-        except Exception as e:
-            log(f"⚠️ Final order check failed: {e}")
+            if status in ["canceled", "expired"]:
+                log(f"ℹ️ Order {ex_id} {status} by Kalshi during polling.")
+                return False, 0, 0
 
-        # Cancel so the order can't fill as a ghost on a future tick
-        cancel_order_safe(client, ex_id)
+        # Polling timed out — cancel and check for late fill
+        log(f"⚠️ Order {ex_id} unfilled after polling window. Cancelling...")
+        qty, avg = cancel_order_safe(client, ex_id)
+        if qty > 0:
+            return True, (avg if avg > 0 else price_cents), qty
         return False, 0, 0
 
     except Exception as e:
         log(f"❌ Order Error: {e}")
-        # Cancel if we have an ID but hit an unexpected exception
         if ex_id:
             cancel_order_safe(client, ex_id)
-        # FIX: cooldown on hard failures so the lock isn't released instantly
-        # and the next tick doesn't immediately fire a second order
-        time.sleep(10)
+        time.sleep(10)   # cooldown so lock isn't released instantly on hard failures
         return False, 0, 0
 
 # ====================== RECOVERY ENGINE ======================
@@ -227,15 +240,15 @@ def sync_portfolio_to_state(client, state: dict):
                     pending_id  = state.get("pending_order_id")
                     if pending_id:
                         try:
-                            recovered_order = client.get_order(pending_id).order
-                            avg = getattr(recovered_order, "avg_fill_price", 0)
+                            recovered   = client.get_order(pending_id).order
+                            avg         = getattr(recovered, "avg_fill_price", 0)
                             if avg > 0:
                                 entry_price = avg
                                 log(f"🔄 Recovery: Adopting {qty}x {side.upper()} on {p.ticker} "
-                                    f"@ {entry_price}c (price recovered from order {pending_id}).")
+                                    f"@ {entry_price}c (recovered from order {pending_id}).")
                             else:
                                 log(f"🔄 Recovery: Adopting {qty}x {side.upper()} on {p.ticker}. "
-                                    f"⚠️ Could not recover price from order — stop-loss disabled.")
+                                    f"⚠️ Could not recover price — stop-loss disabled.")
                         except Exception as e:
                             log(f"🔄 Recovery: Adopting {qty}x {side.upper()} on {p.ticker}. "
                                 f"⚠️ Order lookup failed ({e}) — stop-loss disabled.")
@@ -248,6 +261,7 @@ def sync_portfolio_to_state(client, state: dict):
                         "side":               side,
                         "count":              qty,
                         "actual_entry_price": entry_price,
+                        "status":             "filled",
                     }
                     state["pending_order"]    = False
                     state["pending_order_id"] = None
@@ -257,17 +271,17 @@ def sync_portfolio_to_state(client, state: dict):
     except Exception as e:
         log(f"⚠️ Recovery sync error: {e}")
 
+# ====================== API SETUP ======================
+with open(APIKEY_FILE,  "r", encoding="utf-8") as f: api_key_id      = f.read().strip()
+with open(PRIVATE_FILE, "r", encoding="utf-8") as f: private_key_pem = f.read()
+config                 = Configuration(host="https://api.elections.kalshi.com/trade-api/v2")
+config.api_key_id      = api_key_id
+config.private_key_pem = private_key_pem
+client                 = KalshiClient(config)
+
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.3.6 Active (Tight Window)")
-
-    # --- API init ---
-    with open(APIKEY_FILE,  "r", encoding="utf-8") as f: api_key_id      = f.read().strip()
-    with open(PRIVATE_FILE, "r", encoding="utf-8") as f: private_key_pem = f.read()
-    config                 = Configuration(host="https://api.elections.kalshi.com/trade-api/v2")
-    config.api_key_id      = api_key_id
-    config.private_key_pem = private_key_pem
-    client                 = KalshiClient(config)
+    log("🪄 Magick Bot v5.4.0 Active (Iron Base)")
 
     override_triggered = False
 
@@ -282,8 +296,8 @@ if __name__ == "__main__":
                 elif key.lower() == b'c':
                     override_triggered = True
 
-            state  = load_state()
             now_et = datetime.now(pytz.timezone("US/Eastern"))
+            state  = load_state()
 
             # --- Balance ---
             try:
@@ -312,7 +326,9 @@ if __name__ == "__main__":
 
             # --- Portfolio recovery ---
             sync_portfolio_to_state(client, state)
-            curr = state["current_trade"]
+            curr             = state["current_trade"]
+            risk_decimal, _  = get_dynamic_risk()
+            current_rsi      = get_btc_rsi()
 
             # --- Market data ---
             try:
@@ -324,38 +340,35 @@ if __name__ == "__main__":
                 markets.sort(key=lambda x: x.close_time)
                 market    = markets[0] if markets else None
                 time_left = (market.close_time - now_et).total_seconds() / 60.0 if market else 0
-                y_ask     = safe_price_cents(market.yes_ask_dollars) if market else 0
-                n_ask     = safe_price_cents(market.no_ask_dollars)  if market else 0
+                y_p       = safe_price_cents(market.yes_bid_dollars) if market else 0
+                n_p       = safe_price_cents(market.no_bid_dollars)  if market else 0
             except Exception as e:
                 log(f"⚠️ Market fetch error: {e}")
                 time.sleep(2)
                 continue
 
-            current_rsi             = get_btc_rsi()
-            risk_decimal, is_window = get_dynamic_risk()
-
             # =================================================================
             # BLOCK 1: MONITORING — stop-loss + settlement
+            # Runs every tick regardless of trading window or market state.
             # =================================================================
-            if curr:
+            if curr and curr.get("status") == "filled":
                 try:
-                    m_live = client.get_market(curr["ticker"]).market
-                    status = getattr(m_live, "status", "").lower()
+                    m_live   = client.get_market(curr["ticker"]).market
+                    status   = getattr(m_live, "status", "").lower()
+                    live_bid = safe_price_cents(
+                        m_live.yes_bid_dollars if curr["side"] == "yes"
+                        else m_live.no_bid_dollars
+                    )
+                    entry_p  = curr["actual_entry_price"]
 
                     # --- Stop-loss ---
                     if status == "open":
-                        live_bid = safe_price_cents(
-                            m_live.yes_bid_dollars if curr["side"] == "yes"
-                            else m_live.no_bid_dollars
-                        )
-                        entry_p = curr["actual_entry_price"]
-
                         if entry_p == 0:
                             pass  # Entry unknown — SL cannot fire safely
-                        elif 0 < live_bid <= entry_p * (1 - STOP_LOSS_THRESHOLD):
+                        elif 0 < live_bid <= entry_p * (1 - STOP_LOSS_THRESHOLD) and time_left > 0.5:
                             log(f"🚨 STOP LOSS: {curr['ticker']} "
                                 f"live={live_bid}c entry={entry_p}c "
-                                f"threshold={entry_p * (1 - STOP_LOSS_THRESHOLD):.0f}c")
+                                f"SL={entry_p * (1 - STOP_LOSS_THRESHOLD):.0f}c")
                             success, _, _ = place_order(
                                 client, curr["ticker"], curr["side"],
                                 curr["count"], "sell", live_bid
@@ -365,7 +378,7 @@ if __name__ == "__main__":
                                 log(f"💸 Stop-loss filled. PnL: ${pnl:+.2f} | "
                                     f"Strikes now: {state['strikes'] + 1}")
                                 update_trades_json({
-                                    "timestamp": now_et.isoformat(),
+                                    "timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"),
                                     "ticker":    curr["ticker"],
                                     "side":      curr["side"],
                                     "pnl":       round(pnl, 2),
@@ -382,62 +395,60 @@ if __name__ == "__main__":
 
                     # --- Settlement retry loop ---
                     elif status in ["closed", "settled"]:
-                        log(f"⏳ Waiting for result on {curr['ticker']}…")
-                        settled = False
+                        if market and market.ticker != curr["ticker"]:
+                            log(f"⏳ Waiting for result on {curr['ticker']}…")
+                            settled = False
 
-                        for attempt in range(30):
-                            try:
-                                m_check = client.get_market(curr["ticker"]).market
-                                res     = getattr(m_check, "result", "").lower()
-                                if res in ["yes", "no"]:
-                                    won = (curr["side"] == res)
-                                    ep  = curr["actual_entry_price"]
-                                    pnl = (
-                                        (100 - ep) * curr["count"] / 100.0 if won
-                                        else -(ep * curr["count"] / 100.0)
-                                    )
-                                    log(f"🏁 SETTLED: {res.upper()} | "
-                                        f"{'WIN' if won else 'LOSS'} | PnL: ${pnl:+.2f}")
-                                    update_trades_json({
-                                        "timestamp": now_et.isoformat(),
-                                        "ticker":    curr["ticker"],
-                                        "side":      curr["side"],
-                                        "pnl":       round(pnl, 2),
-                                        "type":      "SETTLEMENT",
-                                    })
-                                    state["strikes"]          = 0 if won else state["strikes"] + 1
-                                    state["session_pnl"]     += pnl
-                                    state["current_trade"]    = None
-                                    state["pending_order"]    = False
-                                    state["pending_order_id"] = None
-                                    save_state(state)
-                                    play_sound("settle_win" if won else "settle_loss")
-                                    settled = True
-                                    break
+                            for attempt in range(30):   # up to 5 minutes
+                                try:
+                                    m_check = client.get_market(curr["ticker"]).market
+                                    res     = getattr(m_check, "result", "").lower()
+                                    if res in ["yes", "no"]:
+                                        won = (curr["side"] == res)
+                                        ep  = curr["actual_entry_price"]
+                                        pnl = (
+                                            (100 - ep) * curr["count"] / 100.0 if won
+                                            else -(ep * curr["count"] / 100.0)
+                                        )
+                                        log(f"🏁 SETTLED: {res.upper()} | "
+                                            f"{'WIN' if won else 'LOSS'} | PnL: ${pnl:+.2f}")
+                                        update_trades_json({
+                                            "timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"),
+                                            "ticker":    curr["ticker"],
+                                            "side":      curr["side"],
+                                            "pnl":       round(pnl, 2),
+                                            "type":      "SETTLEMENT",
+                                        })
+                                        state["strikes"]          = 0 if won else state["strikes"] + 1
+                                        state["session_pnl"]     += pnl
+                                        state["current_trade"]    = None
+                                        state["pending_order"]    = False
+                                        state["pending_order_id"] = None
+                                        save_state(state)
+                                        play_sound("settle_win" if won else "settle_loss")
+                                        settled = True
+                                        break
+                                except Exception as e:
+                                    log(f"⚠️ Settlement poll error (attempt {attempt + 1}/30): {e}")
+                                time.sleep(10)
 
-                            except Exception as e:
-                                log(f"⚠️ Settlement poll error (attempt {attempt + 1}/30): {e}")
-
-                            time.sleep(10)
-
-                        if not settled:
-                            log(f"⚠️ Settlement timeout on {curr['ticker']} after 5 min — "
-                                f"manual review required.")
+                            if not settled:
+                                log(f"⚠️ Settlement timeout on {curr['ticker']} after 5 min — "
+                                    f"manual review required.")
 
                 except Exception as e:
                     log(f"⚠️ Monitor Error: {e}")
 
             # =================================================================
             # BLOCK 2: ENTRY LOGIC
-            # FIX: Floor raised to ENTRY_TIME_MIN (3.0 min) to ensure the
-            # polling window fits within the contract's remaining lifetime.
             # =================================================================
-            elif not state["pending_order"] and is_window and market:
+            elif not state["pending_order"] and market:
                 if ENTRY_TIME_MIN <= time_left <= ENTRY_TIME_MAX:
-                    if (93 <= y_ask <= 98) or (93 <= n_ask <= 98):
-                        side  = "yes" if 93 <= y_ask <= 98 else "no"
-                        price = y_ask if side == "yes" else n_ask
+                    if (93 <= y_p <= 98) or (93 <= n_p <= 98):
+                        side  = "yes" if 93 <= y_p <= 98 else "no"
+                        price = y_p if side == "yes" else n_p
 
+                        # RSI filter
                         if side == "yes" and current_rsi < RSI_CRASH_LIMIT:
                             log(f"⏭️ Skipping YES: RSI={current_rsi} below crash limit {RSI_CRASH_LIMIT}.")
                         elif side == "no" and current_rsi > RSI_SURGE_LIMIT:
@@ -463,26 +474,29 @@ if __name__ == "__main__":
                                             "side":               side,
                                             "count":              filled_qty,
                                             "actual_entry_price": actual_paid,
+                                            "status":             "filled",
                                         }
                                         save_state(state)
                                         play_sound("buy")
                                         log(f"✅ Filled: {filled_qty}x {side.upper()} "
                                             f"@ {actual_paid}c on {market.ticker}")
+                                        time.sleep(5)
                                     else:
-                                        log("❌ Entry order failed or unfilled.")
+                                        log("⚠️ Entry failed or zero fill. 15s cooldown...")
+                                        time.sleep(15)
                                 finally:
+                                    # Always release lock — even if place_order throws
                                     state["pending_order"]    = False
                                     state["pending_order_id"] = None
                                     save_state(state)
 
-                                time.sleep(10)
-
             # --- Heartbeat ---
-            trade_tag = f" [IN: {curr['side'].upper()}]" if curr else ""
+            trade_tag = (f" [IN: {curr['side'].upper()} @ {curr.get('actual_entry_price')}c]"
+                         if curr else "")
             print(
                 f"\r[{now_et.strftime('%H:%M:%S')}] "
-                f"RSI: {current_rsi} | Cash: ${cash:.2f} | "
-                f"PnL: ${state['session_pnl']:+.2f} | "
+                f"Risk: {int(risk_decimal * 100)}% | RSI: {current_rsi} | "
+                f"Cash: ${cash:.2f} | PnL: ${state['session_pnl']:+.2f} | "
                 f"Strikes: {state['strikes']}{trade_tag}   ",
                 end=""
             )
