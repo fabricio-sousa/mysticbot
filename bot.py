@@ -133,7 +133,7 @@ def place_order(ticker, side, count, action, price_cents=None):
 
         for _ in range(5):
             time.sleep(1.5)
-            order_info = client.get_order(resp.order_id).order
+            order_info = client.get_order(resp.order.order_id).order
             if order_info.status == 'filled' or order_info.filled_count > 0:
                 return True, order_info.avg_fill_price, order_info.filled_count
             if order_info.status in ['canceled', 'expired']:
