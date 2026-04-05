@@ -31,10 +31,10 @@ STOP_LOSS_THRESHOLD = 0.40
 OVERRIDE_TRIGGERED = False
 SESSION_PNL = 0.00         
 
-# --- BINARY RSI GUARDRAILS (v5.2.8) ---
-RSI_PERIOD = 9        # Fast response RSI-9
-RSI_CRASH_LIMIT = 30  # Skip YES if RSI < 30 (BTC dumping)
-RSI_SURGE_LIMIT = 70  # Skip NO if RSI > 70 (BTC mooning)
+# --- BINARY RSI GUARDRAILS ---
+RSI_PERIOD = 9        # Responsive RSI-9
+RSI_CRASH_LIMIT = 30  # Skip YES if RSI < 30
+RSI_SURGE_LIMIT = 70  # Skip NO if RSI > 70
 
 # ====================== DYNAMIC RISK ENGINE ======================
 def get_dynamic_risk():
@@ -45,6 +45,7 @@ def get_dynamic_risk():
     minute = now.minute
     time_float = hour + (minute / 60.0)
 
+    # 0=Mon, 4=Fri
     if 0 <= day <= 4:
         if 0.0 <= time_float < 5.0: return 0.05, True
         if 5.0 <= time_float < 8.5: return 0.05, True
@@ -52,18 +53,17 @@ def get_dynamic_risk():
         if 12.0 <= time_float < 16.0: return 0.10, True
         if 16.5 <= time_float < 17.5: return 0.15, True
         if 22.0 <= time_float < 24.0: return 0.05, True
-    elif day == 6:
+    elif day == 6: # Sunday
         if 12.0 <= time_float < 17.0: return 0.05, True
     return 0.01, True
 
 # ====================== TECHNICAL ANALYTICS ======================
 def get_btc_rsi():
-    """Fetches 1m BTC/USD RSI-9 from Bitfinex Public API"""
+    """Fetches 1m BTC/USD RSI-9 from Bitfinex"""
     try:
-        # Bitfinex candle format: [MTS, OPEN, CLOSE, HIGH, LOW, VOL]
         url = f"https://api-pub.bitfinex.com/v2/candles/trade:1m:tBTCUSD/hist?limit={RSI_PERIOD + 10}"
         resp = requests.get(url, timeout=5).json()
-        closes = [c[2] for c in resp][::-1] # index 2 is close, [::-1] makes it chronological
+        closes = [c[2] for c in resp][::-1] 
         
         deltas = [closes[i+1] - closes[i] for i in range(len(closes)-1)]
         gains = [d if d > 0 else 0 for d in deltas]
@@ -131,7 +131,7 @@ def place_order(ticker, side, count, action, price_cents=None):
                                    client_order_id=order_id, yes_price=actual_limit if side=="yes" else None, 
                                    no_price=actual_limit if side=="no" else None)
         
-        # --- FIX: Access nested order_id ---
+        # Fixed attribute access
         exchange_order_id = resp.order.order_id 
         
         for _ in range(5):
@@ -146,7 +146,7 @@ def place_order(ticker, side, count, action, price_cents=None):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log(f"🪄 Magick Bot v5.2.8 Active (Sentinel Refined)")
+    log(f"🪄 Magick Bot v5.2.9 Active (Risk-Aware Sentinel)")
     
     while True:
         try:
@@ -197,9 +197,10 @@ if __name__ == "__main__":
                         state["current_trade"] = None; state["strikes"] += 1
                         save_state(state); play_sound("stop"); continue
 
-            # --- HEARTBEAT ---
+            # --- UPDATED HEARTBEAT (Shows Risk %) ---
             status_text = f" [IN: {curr['side'].upper()} @ {curr.get('actual_entry_price')}c]" if curr else ""
-            print(f"\r[{now_et.strftime('%H:%M:%S')}] RSI-9: {current_rsi} | Cash: ${cash:.2f} | PnL: ${SESSION_PNL:+.2f}{status_text}", end="")
+            risk_pct = int(risk_decimal * 100)
+            print(f"\r[{now_et.strftime('%H:%M:%S')}] RSI-9: {current_rsi} | Risk: {risk_pct}% | Cash: ${cash:.2f} | PnL: ${SESSION_PNL:+.2f}{status_text}", end="")
 
             if not is_trading_window and not curr:
                 time.sleep(10); continue
@@ -222,16 +223,15 @@ if __name__ == "__main__":
                     state["current_trade"] = None; save_state(state)
                     play_sound("settle_win" if won else "settle_loss")
 
-            # --- ENTRY WITH CORRECTED RSI PROTECTION ---
+            # --- ENTRY ---
             elif not curr and is_trading_window:
                 if 2.0 <= time_left <= 6.0 and (93 <= y_p <= 98 or 93 <= n_p <= 98):
                     side, price = ("yes", y_p) if 93 <= y_p <= 98 else ("no", n_p)
                     
-                    # 🛡️ INVERTED RSI GUARDRAILS 🛡️
                     if side == "yes" and current_rsi < RSI_CRASH_LIMIT:
-                        log(f"🛡️ Guard: Skip YES. RSI {current_rsi} < {RSI_CRASH_LIMIT} (Avoid Crash Risk)"); time.sleep(15); continue
+                        log(f"🛡️ Guard: Skip YES. RSI {current_rsi} < {RSI_CRASH_LIMIT}"); time.sleep(15); continue
                     if side == "no" and current_rsi > RSI_SURGE_LIMIT:
-                        log(f"🛡️ Guard: Skip NO. RSI {current_rsi} > {RSI_SURGE_LIMIT} (Avoid Surge Risk)"); time.sleep(15); continue
+                        log(f"🛡️ Guard: Skip NO. RSI {current_rsi} > {RSI_SURGE_LIMIT}"); time.sleep(15); continue
 
                     qty = int(min(MAX_POSITION_DOLLARS, (cash * risk_decimal)) * 100 // price)
                     if qty >= 1:
