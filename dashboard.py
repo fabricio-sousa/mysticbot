@@ -204,14 +204,7 @@ def index():
                 </div>
             </div>
 
-            <div class="column">
-                <div class="section-title">Guardrails</div>
-                <div class="panel">
-                    <div class="row"><span>Stop Loss</span><span style="color:var(--red); font-weight:bold;">40% Drawdown</span></div>
-                    <div class="row"><span>Hard Floor</span><span style="color:var(--red); font-weight:bold;">$1,000 Shutdown</span></div>
-                    <div class="row"><span>Circuit Breaker</span><span style="color:var(--red); font-weight:bold;">3-Strike Rule</span></div>
-                </div>
-            </div>
+
         </div>
     </body>
     </html>
