@@ -143,7 +143,7 @@ def index():
     <body>
         <div class="header">
             <h1>Mystic Bot</h1>
-            <div class="status">● LIVE & PROTECTED</div>
+            <div class="status">● LIVE</div>
         </div>
 
         <div class="active-banner">
