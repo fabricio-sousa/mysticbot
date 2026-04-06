@@ -44,12 +44,12 @@ def get_dynamic_risk():
     time_float = now.hour + (now.minute / 60.0)
 
     if 0 <= day <= 4:                                          # Monday - Friday
-        if  0.0 <= time_float <  5.0: return 0.03, True       # Overnight (raised from 1%)
-        if  5.0 <= time_float <  8.5: return 0.03, True       # Pre-market (raised from 1%)
+        if  0.0 <= time_float <  5.0: return 0.03, True       # Overnight
+        if  5.0 <= time_float <  8.5: return 0.03, True       # Pre-market
         if 10.5 <= time_float < 12.0: return 0.15, True       # High confidence open
         if 12.0 <= time_float < 16.0: return 0.10, True       # Balanced midday
         if 16.5 <= time_float < 17.5: return 0.15, True       # Primary close window
-        if 22.0 <= time_float < 24.0: return 0.03, True       # Asian open (raised from 1%)
+        if 22.0 <= time_float < 24.0: return 0.03, True       # Asian open
 
     elif day == 5:                                             # Saturday
         if 10.0 <= time_float < 17.0: return 0.05, True       # Saturday daytime
@@ -57,7 +57,7 @@ def get_dynamic_risk():
     elif day == 6:                                             # Sunday
         if 12.0 <= time_float < 17.0: return 0.05, True       # Sunday afternoon
 
-    return 0.01, True   # Standby - all other hours, minimal size
+    return 0.01, True   # Standby
 
 # ====================== RSI ======================
 def get_btc_rsi() -> float:
@@ -114,19 +114,24 @@ def play_sound(event_type):
 
 def parse_order(order) -> tuple[int, int]:
     """
-    Extract (filled_qty, avg_price_cents) from an order object using
-    the correct SDK fields confirmed via debug:
-      - fill_count_fp:         string like '32.00' — number of contracts filled
-      - taker_fill_cost_dollars: string like '31.648000' — total cost in dollars
-    avg price = taker_fill_cost_dollars / fill_count_fp * 100 (to get cents)
+    Extract (filled_qty, avg_price_cents) from an order object.
+    Fields confirmed via debug:
+      - fill_count_fp:           contracts filled, string like '32.00'
+      - taker_fill_cost_dollars: total cost when filled as taker
+      - maker_fill_cost_dollars: total cost when filled as maker
+    Orders can fill as either taker or maker — checks both.
     Returns (0, 0) if unfilled.
     """
     try:
         qty = int(float(getattr(order, 'fill_count_fp', '0') or '0'))
         if qty <= 0:
             return 0, 0
-        cost_dollars = float(getattr(order, 'taker_fill_cost_dollars', '0') or '0')
-        avg_cents = int(round((cost_dollars / qty) * 100)) if qty > 0 else 0
+        taker = float(getattr(order, 'taker_fill_cost_dollars', '0') or '0')
+        maker = float(getattr(order, 'maker_fill_cost_dollars', '0') or '0')
+        cost  = taker if taker > 0 else maker
+        if cost == 0:
+            log("⚠️ Both taker and maker fill cost are 0 — entry price unknown, PnL will be inaccurate.")
+        avg_cents = int(round((cost / qty) * 100)) if cost > 0 else 0
         return qty, avg_cents
     except Exception:
         return 0, 0
@@ -152,10 +157,10 @@ def place_order(ticker, side, count, action, price_cents=None):
             no_price=actual_limit if side == "no" else None
         )
 
-        order = resp.order
+        order     = resp.order
         target_id = order.order_id
 
-        # Check if already filled in the create response (common for liquid markets)
+        # Check if already filled in the create response
         qty, avg_cents = parse_order(order)
         if qty > 0:
             log(f"⚡ Instant fill detected in create response: {qty} @ {avg_cents}c")
@@ -165,12 +170,11 @@ def place_order(ticker, side, count, action, price_cents=None):
         for _ in range(5):
             time.sleep(1.5)
             order_info = client.get_order(target_id).order
-            status = getattr(order_info, 'status', None)
-
+            status     = getattr(order_info, 'status', None)
             qty, avg_cents = parse_order(order_info)
             if qty > 0:
                 return True, avg_cents, qty
-            if status is not None and str(status).lower() in ['canceled', 'expired', 'orderStatus.canceled', 'orderStatus.expired']:
+            if status is not None and str(status).lower() in ['canceled', 'expired']:
                 log(f"ℹ️ Order {target_id} {status} during polling.")
                 break
 
@@ -182,7 +186,7 @@ def place_order(ticker, side, count, action, price_cents=None):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.2.8 Active (Correct Fill Detection)")
+    log("🪄 Magick Bot v5.2.9 Active (Maker Fill Fix)")
 
     while True:
         try:
@@ -224,7 +228,7 @@ if __name__ == "__main__":
                 m_live = client.get_market(curr['ticker']).market
                 live_bid = safe_price_cents(m_live.yes_bid_dollars if curr['side'] == "yes" else m_live.no_bid_dollars)
                 entry_p = curr['actual_entry_price']
-                stop_p = entry_p * (1 - STOP_LOSS_THRESHOLD)
+                stop_p = round(entry_p * (1 - STOP_LOSS_THRESHOLD), 2)
 
                 if 0 < live_bid <= stop_p and time_left > 0.5:
                     log(f"🚨 STOP LOSS: Selling {curr['ticker']} (Live: {live_bid}c | SL: {stop_p}c)")
