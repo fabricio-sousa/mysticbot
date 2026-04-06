@@ -169,7 +169,7 @@ def index():
 
         <div class="main-layout">
             <div class="column">
-                <div class="section-title">Schedule (ET)</div>
+                <div class="section-title">Schedule(ET) and Capital Allocation (Risk)</div>
                 <div class="panel">
                     {% for s in schedule %}
                     <div class="row {% if s.label == window.label %}current-row{% endif %}">
