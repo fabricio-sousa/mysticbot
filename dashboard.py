@@ -4,14 +4,12 @@ import re
 import pandas as pd
 import pytz
 from flask import Flask, render_template_string
-from pyngrok import ngrok, conf
 from datetime import datetime
 
 # --- CONFIGURATION ---
 USER_PROFILE = os.environ['USERPROFILE']
 FOLDER_NAME = 'mystic-bot'
 FILE_PATH = os.path.join(USER_PROFILE, 'Desktop', FOLDER_NAME, 'trades.json')
-NGROK_AUTH_TOKEN = "3BY7aKR0ov1mqA8YhNOC61B3aRB_5fBPgqz19fqpv9FwwNTxm"
 
 app = Flask(__name__)
 
@@ -143,7 +141,7 @@ def index():
     <body>
         <div class="header">
             <h1>Mystic Bot</h1>
-            <div class="status">● LIVE</div>
+            <div class="status">● LIVE & PROTECTED</div>
         </div>
 
         <div class="active-banner">
@@ -169,7 +167,7 @@ def index():
 
         <div class="main-layout">
             <div class="column">
-                <div class="section-title">Schedule(ET) and Capital Allocation (Risk)</div>
+                <div class="section-title">Schedule (ET)</div>
                 <div class="panel">
                     {% for s in schedule %}
                     <div class="row {% if s.label == window.label %}current-row{% endif %}">
@@ -222,12 +220,5 @@ def index():
     )
 
 if __name__ == '__main__':
-    conf.get_default().auth_token = NGROK_AUTH_TOKEN
-    try:
-        tunnels = ngrok.get_tunnels()
-        for t in tunnels: ngrok.disconnect(t.public_url)
-        public_url = ngrok.connect(5000).public_url
-        print(f"\n🚀 DASHBOARD READY\n🔗 {public_url}\n")
-        app.run(port=5000, debug=False, use_reloader=False)
-    except Exception as e:
-        print(f"Error: {e}")
+    print("\n🚀 DASHBOARD READY\n🔗 http://localhost:5000\n")
+    app.run(host='127.0.0.1', port=5000, debug=False, use_reloader=False)
