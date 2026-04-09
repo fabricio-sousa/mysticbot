@@ -157,7 +157,7 @@ def index():
     <body>
         <div class="header">
             <h1>Mystic Trader</h1>
-            <div class="status"><span class="pulse-dot">●</span> LIVE &amp; TRADING</div>
+            <div class="status"><span class="pulse-dot">●</span> LIVE </div>
         </div>
 
         <div class="active-banner">
