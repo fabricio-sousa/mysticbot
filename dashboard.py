@@ -20,7 +20,7 @@ STRATEGY_SCHEDULE = [
     {"days": "Mon-Fri", "range": range(0, 5), "start": 1030, "end": 1200, "time_str": "10:30am–12:00pm","risk": "15%", "label": "High Confidence"},
     {"days": "Mon-Fri", "range": range(0, 5), "start": 1200, "end": 1600, "time_str": "12:00pm–4:00pm", "risk": "10%", "label": "Balanced Midday"},
     {"days": "Mon-Fri", "range": range(0, 5), "start": 1630, "end": 1730, "time_str": "4:30pm–5:30pm",  "risk": "15%", "label": "Primary Window"},
-    {"days": "Mon-Fri", "range": range(0, 5), "start": 2200, "end": 2400, "time_str": "10:00pm–12:00am","risk": "3%",  "label": "Asian Open"},
+    {"days": "Mon-Fri", "range": range(0, 5), "start": 2200, "end": 2400, "time_str": "10:00pm–12:00am","risk": "5%",  "label": "Asian Open"},
     {"days": "Saturday","range": [5],         "start": 1000, "end": 1700, "time_str": "Sat 10am–5pm",   "risk": "5%",  "label": "Saturday"},
     {"days": "Sunday",  "range": [6],         "start": 1200, "end": 1700, "time_str": "Sun 12pm–5pm",   "risk": "5%",  "label": "Sunday Afternoon"},
 ]
