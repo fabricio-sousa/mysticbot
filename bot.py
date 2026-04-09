@@ -186,7 +186,7 @@ def place_order(ticker, side, count, action, price_cents=None):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.3.0 Active (SL Double-Fire Fix)")
+    log("🪄 Magick Bot v5.3.1 Active (SL Cooldown + Fresh Quotes)")
 
     while True:
         try:
@@ -244,6 +244,8 @@ if __name__ == "__main__":
                     save_state(state)
                     play_sound("stop")
                     log(f"💸 Stop-loss complete. PnL: ${pnl:+.2f} | Strikes: {state['strikes']}")
+                    log(f"⏸️ Post-SL cooldown (60s) — skipping next entry window.")
+                    time.sleep(60)
                     continue
 
             # --- HEARTBEAT ---
@@ -276,6 +278,16 @@ if __name__ == "__main__":
 
             # --- ENTRY ---
             elif not curr and is_trading_window:
+                # Re-fetch fresh prices immediately before entry check
+                # to avoid acting on stale quotes from earlier in the tick
+                try:
+                    fresh = client.get_market(market.ticker).market
+                    y_p = safe_price_cents(fresh.yes_bid_dollars)
+                    n_p = safe_price_cents(fresh.no_bid_dollars)
+                    time_left = (fresh.close_time - now_et).total_seconds() / 60.0
+                except Exception:
+                    pass  # use existing values if refresh fails
+
                 if 2.0 <= time_left <= 6.0 and (93 <= y_p <= 98 or 93 <= n_p <= 98):
                     side, price = ("yes", y_p) if 93 <= y_p <= 98 else ("no", n_p)
 
