@@ -44,8 +44,8 @@ def get_dynamic_risk():
     time_float = now.hour + (now.minute / 60.0)
 
     if 0 <= day <= 4:                                          # Monday - Friday
-        if  0.0 <= time_float <  5.0: return 0.03, True       # Overnight
-        if  5.0 <= time_float <  8.5: return 0.03, True       # Pre-market
+        if  0.0 <= time_float <  5.0: return 0.05, True       # Overnight
+        if  5.0 <= time_float <  8.5: return 0.01, False      # Pre-market — skip (high volatility)
         if 10.5 <= time_float < 12.0: return 0.15, True       # High confidence open
         if 12.0 <= time_float < 16.0: return 0.10, True       # Balanced midday
         if 16.5 <= time_float < 17.5: return 0.15, True       # Primary close window
@@ -186,7 +186,7 @@ def place_order(ticker, side, count, action, price_cents=None):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.3.1 Active (SL Cooldown + Fresh Quotes)")
+    log("🪄 Magick Bot v5.3.2 Active (Pre-Market Skip)")
 
     while True:
         try:
