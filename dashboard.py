@@ -33,7 +33,7 @@ def get_current_window():
     for window in STRATEGY_SCHEDULE:
         if day in window.get("range", []) and window["start"] <= time_int < window["end"]:
             return window
-    return {"label": "Auto-Pilot (Passive)", "risk": "1%"}
+    return {"label": "Auto-Pilot", "risk": "1%"}
 
 def clean_val(value):
     if value is None or value == "": return 0.0
