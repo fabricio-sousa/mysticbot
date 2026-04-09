@@ -32,9 +32,28 @@ OVERRIDE_TRIGGERED = False
 SESSION_PNL = 0.00
 
 # --- RSI ---
-RSI_PERIOD      = 9
-RSI_LOW_LIMIT   = 38   # Skip ALL entries if RSI below this (too bearish)
-RSI_HIGH_LIMIT  = 62   # Skip ALL entries if RSI above this (too bullish)
+RSI_PERIOD = 9
+
+# RSI limits vary by time window — looser overnight/weekends (calmer markets),
+# tighter during high-activity US hours where momentum is more dangerous.
+# Format: (low_limit, high_limit)
+RSI_LIMITS_BY_WINDOW = {
+    "overnight":  (25, 75),   # 12AM–5AM  — Asian session, low vol, wide band
+    "asian_open": (25, 75),   # 10PM–12AM — similar character to overnight
+    "weekend":    (30, 70),   # Sat/Sun   — moderate, less macro risk
+    "default":    (38, 62),   # All US hours — tightest, most momentum risk
+}
+
+def get_rsi_limits() -> tuple:
+    """Return (low, high) RSI limits based on current time window."""
+    tz = pytz.timezone("US/Eastern")
+    now = datetime.now(tz)
+    day = now.weekday()
+    tf  = now.hour + (now.minute / 60.0)
+    if day in (5, 6):                          return RSI_LIMITS_BY_WINDOW["weekend"]
+    if 0.0  <= tf <  5.0:                      return RSI_LIMITS_BY_WINDOW["overnight"]
+    if 22.0 <= tf <  24.0:                     return RSI_LIMITS_BY_WINDOW["asian_open"]
+    return RSI_LIMITS_BY_WINDOW["default"]
 
 # --- Volatility guard ---
 # Max allowed BTC price range over last 5 candles before skipping entry.
@@ -208,7 +227,7 @@ def place_order(ticker, side, count, action, price_cents=None):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.3.4 Active (Symmetric RSI + Vol Guard)")
+    log("🪄 Magick Bot v5.3.5 Active (Time-Aware RSI + Vol Guard)")
 
     while True:
         try:
@@ -315,12 +334,13 @@ if __name__ == "__main__":
                 if 2.0 <= time_left <= 6.0 and (93 <= y_p <= 98 or 93 <= n_p <= 98):
                     side, price = ("yes", y_p) if 93 <= y_p <= 98 else ("no", n_p)
 
+                    rsi_low, rsi_high = get_rsi_limits()
                     if current_volatility >= VOLATILITY_LIMIT:
                         log(f"⏭️ Skipping {side.upper()}: volatility ${current_volatility:.0f} exceeds limit ${VOLATILITY_LIMIT}.")
-                    elif current_rsi < RSI_LOW_LIMIT:
-                        log(f"⏭️ Skipping {side.upper()}: RSI={current_rsi} below {RSI_LOW_LIMIT} (market too bearish/volatile).")
-                    elif current_rsi > RSI_HIGH_LIMIT:
-                        log(f"⏭️ Skipping {side.upper()}: RSI={current_rsi} above {RSI_HIGH_LIMIT} (market too bullish/volatile).")
+                    elif current_rsi < rsi_low:
+                        log(f"⏭️ Skipping {side.upper()}: RSI={current_rsi} below {rsi_low} (window limit).")
+                    elif current_rsi > rsi_high:
+                        log(f"⏭️ Skipping {side.upper()}: RSI={current_rsi} above {rsi_high} (window limit).")
                     else:
                         qty = int(min(MAX_POSITION_DOLLARS, (cash * risk_decimal)) * 100 // price)
                         if qty >= 1:
