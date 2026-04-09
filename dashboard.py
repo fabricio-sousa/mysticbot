@@ -12,6 +12,7 @@ USER_PROFILE = os.environ['USERPROFILE']
 FOLDER_NAME = 'mystic-bot'
 FILE_PATH    = os.path.join(USER_PROFILE, 'Desktop', FOLDER_NAME, 'trades.json')
 NGROK_KEY    = os.path.join(USER_PROFILE, 'Desktop', 'ngrok.txt')
+LOG_FILE     = os.path.join(USER_PROFILE, 'Desktop', FOLDER_NAME, 'log.txt')
 
 def start_ngrok():
     """Read authtoken from ngrok.txt and open a public tunnel on port 5000."""
@@ -60,6 +61,96 @@ def clean_val(value):
         return -v if is_neg else v
     except: return 0.0
 
+def get_log_lines(n=80):
+    """
+    Read last n lines of log.txt, parse and classify each line,
+    collapse consecutive 500 API errors into a single summary row.
+    Returns list of dicts: {time, icon, label, cls, raw}
+    """
+    if not os.path.exists(LOG_FILE):
+        return []
+    try:
+        with open(LOG_FILE, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+    except Exception:
+        return []
+
+    lines = [l.rstrip() for l in lines if l.strip()][-n:]
+
+    def classify(line):
+        if '🏁 RESULT' in line:
+            won = 'WIN' in line
+            pnl_m = re.search(r'PnL: \$([+-]?\d+\.\d+)', line)
+            pnl   = pnl_m.group(1) if pnl_m else ''
+            ticker_m = re.search(r'RESULT: (\w+)', line)
+            result = ticker_m.group(1) if ticker_m else ''
+            label = f"Settlement — {result} — PnL: ${pnl}" if pnl else f"Settlement — {result}"
+            return ('✅' if won else '❌', label, 'log-win' if won else 'log-loss')
+        if '🚨 STOP LOSS' in line:
+            price_m = re.search(r'Live: (\d+)c', line)
+            sl_m    = re.search(r'SL: ([\d.]+)c', line)
+            label = f"Stop-loss fired — live {price_m.group(1)}c vs SL {sl_m.group(1)}c" if price_m and sl_m else "Stop-loss fired"
+            return ('🛑', label, 'log-stop')
+        if '💸 Stop-loss complete' in line:
+            pnl_m = re.search(r'PnL: \$([+-]?\d+\.\d+)', line)
+            label = f"Stop-loss complete — PnL: ${pnl_m.group(1)}" if pnl_m else "Stop-loss complete"
+            return ('💸', label, 'log-stop')
+        if '⚡ Pursuit' in line:
+            m = re.search(r'Pursuit: (\w+) @ (\d+)c \(Qty: (\d+)\)', line)
+            label = f"Entering {m.group(1)} — {m.group(3)} contracts @ {m.group(2)}c" if m else "Entry attempt"
+            return ('⚡', label, 'log-entry')
+        if '✅ Filled' in line:
+            m = re.search(r'Filled: (\d+) contracts @ (\d+)c', line)
+            label = f"Filled {m.group(1)} contracts @ {m.group(2)}c" if m else "Order filled"
+            return ('✅', label, 'log-fill')
+        if '⏳ Finalizing' in line:
+            m = re.search(r'Finalizing (KXBTC\S+)', line)
+            label = f"Awaiting settlement — {m.group(1)}" if m else "Awaiting settlement"
+            return ('⏳', label, 'log-info')
+        if '⏭️ Skipping' in line or 'Skipping' in line:
+            m = re.search(r'Skipping (.+?)\.?$', line)
+            label = f"Skipped — {m.group(1)}" if m else "Entry skipped"
+            return ('⏭️', label, 'log-skip')
+        if '⏸️' in line:
+            return ('⏸️', "Post stop-loss cooldown (60s)", 'log-skip')
+        if '🪄 Magick Bot' in line:
+            m = re.search(r'(Magick Bot .+)', line)
+            return ('🤖', m.group(1) if m else "Bot started", 'log-info')
+        if '⚠️ Loop Error' in line and '500' in line:
+            return ('⚠️', "Kalshi API error (500)", 'log-error')
+        if '⚠️ Entry failed' in line:
+            return ('⚠️', "Entry failed — 15s cooldown", 'log-error')
+        if '⚠️' in line or '❌' in line:
+            clean = re.sub(r'\[.*?\ET\]\s*', '', line)
+            clean = re.sub(r'HTTP response.*', '', clean).strip()
+            return ('⚠️', clean[:120], 'log-error')
+        return None
+
+    parsed = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        ts_m = re.match(r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) ET\]', line)
+        ts = ts_m.group(1)[11:16] if ts_m else ''  # HH:MM only
+
+        # Collapse consecutive 500 errors
+        if '⚠️ Loop Error' in line and '500' in line:
+            count = 1
+            while i + count < len(lines) and '⚠️ Loop Error' in lines[i + count] and '500' in lines[i + count]:
+                count += 1
+            if count > 1:
+                parsed.append({'time': ts, 'icon': '⚠️', 'label': f"Kalshi API outage — {count} errors suppressed", 'cls': 'log-error'})
+                i += count
+                continue
+
+        result = classify(line)
+        if result:
+            icon, label, cls = result
+            parsed.append({'time': ts, 'icon': icon, 'label': label, 'cls': cls})
+        i += 1
+
+    return list(reversed(parsed))  # newest first
+
 def get_financial_data():
     if not os.path.exists(FILE_PATH):
         return {"error": f"File not found at: {FILE_PATH}"}
@@ -96,6 +187,7 @@ def get_financial_data():
 def index():
     data        = get_financial_data()
     current_win = get_current_window()
+    log_entries = get_log_lines(80)
 
     if "error" in data:
         return f"<body style='background:#0d1117;color:white;padding:50px;'><h2>⚠️ Data Error</h2><p>{data['error']}</p></body>"
@@ -167,6 +259,21 @@ def index():
                 50%       { text-shadow: 0 0 12px rgba(63,185,80,0.9); opacity: 0.75; }
             }
             .status { color: var(--green); font-size: 11px; font-weight: bold; text-transform: uppercase; margin-top: 5px; animation: pulse-glow 2s ease-in-out infinite; }
+
+            .log-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 15px; margin-top: 20px; }
+            .log-row { display: flex; align-items: baseline; gap: 10px; padding: 6px 0; border-bottom: 1px solid #21262d; font-size: 12px; }
+            .log-row:last-child { border-bottom: none; }
+            .log-time { color: #8b949e; min-width: 42px; font-size: 11px; }
+            .log-icon { min-width: 20px; text-align: center; }
+            .log-label { flex: 1; }
+            .log-win   .log-label { color: var(--green); }
+            .log-loss  .log-label { color: #8b949e; }
+            .log-stop  .log-label { color: var(--red); }
+            .log-entry .log-label { color: var(--blue); }
+            .log-fill  .log-label { color: var(--green); }
+            .log-skip  .log-label { color: #8b949e; font-style: italic; }
+            .log-error .log-label { color: var(--red); opacity: 0.7; }
+            .log-info  .log-label { color: #8b949e; }
         </style>
         <meta http-equiv="refresh" content="30">
     </head>
@@ -243,6 +350,23 @@ def index():
 
 
         </div>
+
+        <!-- LIVE LOG -->
+        <div style="margin-top: 20px;">
+            <div class="section-title">Live Log (last 80 events, newest first)</div>
+            <div class="log-panel" style="max-height: 500px; overflow-y: auto;">
+                {% for entry in log_entries %}
+                <div class="log-row {{ entry.cls }}">
+                    <span class="log-time">{{ entry.time }}</span>
+                    <span class="log-icon">{{ entry.icon }}</span>
+                    <span class="log-label">{{ entry.label }}</span>
+                </div>
+                {% else %}
+                <div style="color:#8b949e; font-size:12px; text-align:center; padding:20px;">No log entries found.</div>
+                {% endfor %}
+            </div>
+        </div>
+
     </body>
     </html>
     """
@@ -256,6 +380,7 @@ def index():
         wins=data['wins'],
         window=current_win,
         schedule=STRATEGY_SCHEDULE,
+        log_entries=log_entries,
     )
 
 if __name__ == '__main__':
