@@ -186,7 +186,7 @@ def place_order(ticker, side, count, action, price_cents=None):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.2.9 Active (Maker Fill Fix)")
+    log("🪄 Magick Bot v5.3.0 Active (SL Double-Fire Fix)")
 
     while True:
         try:
@@ -232,16 +232,19 @@ if __name__ == "__main__":
 
                 if 0 < live_bid <= stop_p and time_left > 0.5:
                     log(f"🚨 STOP LOSS: Selling {curr['ticker']} (Live: {live_bid}c | SL: {stop_p}c)")
-                    success, _, _ = place_order(curr['ticker'], curr['side'], curr['count'], "sell", live_bid)
-                    if success:
-                        pnl = (live_bid - entry_p) * curr['count'] / 100.0
-                        update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "STOP_LOSS"})
-                        SESSION_PNL += pnl
-                        state["current_trade"] = None
-                        state["strikes"] = state.get("strikes", 0) + 1
-                        save_state(state)
-                        play_sound("stop")
-                        continue
+                    # FIX: Clear trade immediately before placing sell order
+                    # so a second loop tick can't fire another stop while sell is in flight
+                    state["current_trade"] = None
+                    save_state(state)
+                    success, actual_sell, _ = place_order(curr['ticker'], curr['side'], curr['count'], "sell", live_bid)
+                    pnl = (actual_sell - entry_p) * curr['count'] / 100.0
+                    update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "STOP_LOSS"})
+                    SESSION_PNL += pnl
+                    state["strikes"] = state.get("strikes", 0) + 1
+                    save_state(state)
+                    play_sound("stop")
+                    log(f"💸 Stop-loss complete. PnL: ${pnl:+.2f} | Strikes: {state['strikes']}")
+                    continue
 
             # --- HEARTBEAT ---
             status_text = f" [IN: {curr['side'].upper()} @ {curr.get('actual_entry_price')}c]" if curr else ""
