@@ -15,8 +15,8 @@ app = Flask(__name__)
 
 # --- SCHEDULE DATA (matches bot v5.2.8) ---
 STRATEGY_SCHEDULE = [
-    {"days": "Mon-Fri", "range": range(0, 5), "start":    0, "end":  500, "time_str": "12:00am–5:00am", "risk": "3%",  "label": "Overnight"},
-    {"days": "Mon-Fri", "range": range(0, 5), "start":  500, "end":  850, "time_str": "5:00am–8:30am",  "risk": "3%",  "label": "Pre-Market"},
+    {"days": "Mon-Fri", "range": range(0, 5), "start":    0, "end":  500, "time_str": "12:00am–5:00am", "risk": "5%",  "label": "Overnight"},
+    {"days": "Mon-Fri", "range": range(0, 5), "start":  500, "end":  850, "time_str": "5:00am–8:30am",  "risk": "—",   "label": "Pre-Market (Skipped)"},
     {"days": "Mon-Fri", "range": range(0, 5), "start": 1030, "end": 1200, "time_str": "10:30am–12:00pm","risk": "15%", "label": "High Confidence"},
     {"days": "Mon-Fri", "range": range(0, 5), "start": 1200, "end": 1600, "time_str": "12:00pm–4:00pm", "risk": "10%", "label": "Balanced Midday"},
     {"days": "Mon-Fri", "range": range(0, 5), "start": 1630, "end": 1730, "time_str": "4:30pm–5:30pm",  "risk": "15%", "label": "Primary Window"},
