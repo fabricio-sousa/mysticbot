@@ -49,7 +49,7 @@ def get_dynamic_risk():
         if 10.5 <= time_float < 12.0: return 0.15, True       # High confidence open
         if 12.0 <= time_float < 16.0: return 0.10, True       # Balanced midday
         if 16.5 <= time_float < 17.5: return 0.15, True       # Primary close window
-        if 22.0 <= time_float < 24.0: return 0.03, True       # Asian open
+        if 22.0 <= time_float < 24.0: return 0.05, True       # Asian open
 
     elif day == 5:                                             # Saturday
         if 10.0 <= time_float < 17.0: return 0.05, True       # Saturday daytime
