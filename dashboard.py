@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import threading
 import pandas as pd
 import pytz
 from flask import Flask, render_template_string
@@ -9,7 +10,22 @@ from datetime import datetime
 # --- CONFIGURATION ---
 USER_PROFILE = os.environ['USERPROFILE']
 FOLDER_NAME = 'mystic-bot'
-FILE_PATH = os.path.join(USER_PROFILE, 'Desktop', FOLDER_NAME, 'trades.json')
+FILE_PATH    = os.path.join(USER_PROFILE, 'Desktop', FOLDER_NAME, 'trades.json')
+NGROK_KEY    = os.path.join(USER_PROFILE, 'Desktop', 'ngrok.txt')
+
+def start_ngrok():
+    """Read authtoken from ngrok.txt and open a public tunnel on port 5000."""
+    try:
+        from pyngrok import ngrok, conf
+        with open(NGROK_KEY, 'r') as f:
+            token = f.read().strip()
+        conf.get_default().auth_token = token
+        tunnel = ngrok.connect(5000, "http")
+        print(f"\n🌐 Public URL: {tunnel.public_url}\n")
+    except FileNotFoundError:
+        print("⚠️  ngrok.txt not found on Desktop — running local only.")
+    except Exception as e:
+        print(f"⚠️  ngrok failed: {e} — running local only.")
 
 app = Flask(__name__)
 
@@ -33,7 +49,7 @@ def get_current_window():
     for window in STRATEGY_SCHEDULE:
         if day in window.get("range", []) and window["start"] <= time_int < window["end"]:
             return window
-    return {"label": "Auto-Pilot", "risk": "1%"}
+    return {"label": "Auto-Pilot (Passive)", "risk": "1%"}
 
 def clean_val(value):
     if value is None or value == "": return 0.0
@@ -157,7 +173,7 @@ def index():
     <body>
         <div class="header">
             <h1>Mystic Trader</h1>
-            <div class="status"><span class="pulse-dot">●</span> LIVE </div>
+            <div class="status"><span class="pulse-dot">●</span> LIVE &amp; TRADING</div>
         </div>
 
         <div class="active-banner">
@@ -192,7 +208,7 @@ def index():
                         <span style="flex:1; text-align:right;">{{ s.label }}</span>
                     </div>
                     {% endfor %}
-                    <div class="row {% if window.label == 'Auto-Pilot' %}current-row{% endif %}">
+                    <div class="row {% if window.label == 'Auto-Pilot (Passive)' %}current-row{% endif %}">
                         <span style="color:#8b949e; min-width:130px;">All other times</span>
                         <span style="color:var(--gold); min-width:35px;">1%</span>
                         <span style="flex:1; text-align:right;">Auto-Pilot</span>
@@ -243,5 +259,6 @@ def index():
     )
 
 if __name__ == '__main__':
-    print("\n🚀 DASHBOARD READY\n🔗 http://localhost:5000\n")
+    print("\n🚀 DASHBOARD READY\n🔗 http://localhost:5000")
+    threading.Thread(target=start_ngrok, daemon=True).start()
     app.run(host='127.0.0.1', port=5000, debug=False, use_reloader=False)
