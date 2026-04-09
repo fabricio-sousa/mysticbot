@@ -33,8 +33,14 @@ SESSION_PNL = 0.00
 
 # --- RSI ---
 RSI_PERIOD      = 9
-RSI_CRASH_LIMIT = 30
-RSI_SURGE_LIMIT = 70
+RSI_CRASH_LIMIT = 30   # Skip YES entry if RSI too low (bearish momentum)
+RSI_SURGE_LIMIT = 70   # Skip NO  entry if RSI too high (bullish momentum)
+
+# --- Volatility guard ---
+# Max allowed BTC price range over last 5 candles before skipping entry.
+# A $300+ move in 5 minutes signals a breakout/breakdown — avoid chasing.
+VOLATILITY_CANDLES = 5
+VOLATILITY_LIMIT   = 300  # dollars
 
 # ====================== DYNAMIC RISK ENGINE ======================
 def get_dynamic_risk():
@@ -49,7 +55,7 @@ def get_dynamic_risk():
         if 10.5 <= time_float < 12.0: return 0.15, True       # High confidence open
         if 12.0 <= time_float < 16.0: return 0.10, True       # Balanced midday
         if 16.5 <= time_float < 17.5: return 0.15, True       # Primary close window
-        if 22.0 <= time_float < 24.0: return 0.05, True       # Asian open
+        if 22.0 <= time_float < 24.0: return 0.03, True       # Asian open
 
     elif day == 5:                                             # Saturday
         if 10.0 <= time_float < 17.0: return 0.05, True       # Saturday daytime
@@ -76,6 +82,22 @@ def get_btc_rsi() -> float:
         return round(100 - (100 / (1 + rs)), 1)
     except Exception:
         return 50.0
+
+def get_btc_volatility() -> float:
+    """
+    Returns the BTC high-low range over the last VOLATILITY_CANDLES 1-minute
+    candles. A large range means a breakout/breakdown is in progress — skip entry.
+    Falls back to 0.0 (no block) if the API call fails.
+    """
+    try:
+        url  = f"https://api-pub.bitfinex.com/v2/candles/trade:1m:tBTCUSD/hist?limit={VOLATILITY_CANDLES + 2}"
+        resp = requests.get(url, timeout=5).json()
+        candles = resp[:VOLATILITY_CANDLES]
+        highs = [c[3] for c in candles]
+        lows  = [c[4] for c in candles]
+        return round(max(highs) - min(lows), 2)
+    except Exception:
+        return 0.0   # fail open — don't block on API error
 
 # ====================== HELPERS ======================
 def log(msg: str):
@@ -200,7 +222,8 @@ if __name__ == "__main__":
             cash = client.get_balance().balance / 100.0
             curr = state.get("current_trade")
             risk_decimal, is_trading_window = get_dynamic_risk()
-            current_rsi = get_btc_rsi()
+            current_rsi        = get_btc_rsi()
+            current_volatility = get_btc_volatility()
 
             if OVERRIDE_TRIGGERED:
                 log("🛠️ Manual Override: Clearing State")
@@ -250,7 +273,8 @@ if __name__ == "__main__":
 
             # --- HEARTBEAT ---
             status_text = f" [IN: {curr['side'].upper()} @ {curr.get('actual_entry_price')}c]" if curr else ""
-            print(f"\r[{now_et.strftime('%H:%M:%S')}] Risk: {int(risk_decimal*100)}% | RSI: {current_rsi} | Cash: ${cash:.2f} | Session: ${SESSION_PNL:+.2f}{status_text}", end="")
+            vol_flag = " ⚠️VOL" if current_volatility >= VOLATILITY_LIMIT else ""
+            print(f"\r[{now_et.strftime('%H:%M:%S')}] Risk: {int(risk_decimal*100)}% | RSI: {current_rsi} | Vol: ${current_volatility:.0f}{vol_flag} | Cash: ${cash:.2f} | Session: ${SESSION_PNL:+.2f}{status_text}", end="")
 
             if not is_trading_window and not curr:
                 time.sleep(10)
