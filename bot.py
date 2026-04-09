@@ -33,8 +33,8 @@ SESSION_PNL = 0.00
 
 # --- RSI ---
 RSI_PERIOD      = 9
-RSI_CRASH_LIMIT = 30   # Skip YES entry if RSI too low (bearish momentum)
-RSI_SURGE_LIMIT = 70   # Skip NO  entry if RSI too high (bullish momentum)
+RSI_LOW_LIMIT   = 38   # Skip ALL entries if RSI below this (too bearish)
+RSI_HIGH_LIMIT  = 62   # Skip ALL entries if RSI above this (too bullish)
 
 # --- Volatility guard ---
 # Max allowed BTC price range over last 5 candles before skipping entry.
@@ -208,7 +208,7 @@ def place_order(ticker, side, count, action, price_cents=None):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.3.2 Active (Pre-Market Skip)")
+    log("🪄 Magick Bot v5.3.4 Active (Symmetric RSI + Vol Guard)")
 
     while True:
         try:
@@ -315,10 +315,12 @@ if __name__ == "__main__":
                 if 2.0 <= time_left <= 6.0 and (93 <= y_p <= 98 or 93 <= n_p <= 98):
                     side, price = ("yes", y_p) if 93 <= y_p <= 98 else ("no", n_p)
 
-                    if side == "yes" and current_rsi < RSI_CRASH_LIMIT:
-                        log(f"⏭️ Skipping YES: RSI={current_rsi} below crash limit {RSI_CRASH_LIMIT}.")
-                    elif side == "no" and current_rsi > RSI_SURGE_LIMIT:
-                        log(f"⏭️ Skipping NO: RSI={current_rsi} above surge limit {RSI_SURGE_LIMIT}.")
+                    if current_volatility >= VOLATILITY_LIMIT:
+                        log(f"⏭️ Skipping {side.upper()}: volatility ${current_volatility:.0f} exceeds limit ${VOLATILITY_LIMIT}.")
+                    elif current_rsi < RSI_LOW_LIMIT:
+                        log(f"⏭️ Skipping {side.upper()}: RSI={current_rsi} below {RSI_LOW_LIMIT} (market too bearish/volatile).")
+                    elif current_rsi > RSI_HIGH_LIMIT:
+                        log(f"⏭️ Skipping {side.upper()}: RSI={current_rsi} above {RSI_HIGH_LIMIT} (market too bullish/volatile).")
                     else:
                         qty = int(min(MAX_POSITION_DOLLARS, (cash * risk_decimal)) * 100 // price)
                         if qty >= 1:
