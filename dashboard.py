@@ -87,9 +87,10 @@ def index():
     # Cap at 50 most recent trades for the table
     trades_list = [
         {
-            'time':   r['dt'].strftime('%m/%d %H:%M'),
-            'pnl':    r['trade_pnl'],
-            'result': 'WIN' if r['trade_pnl'] > 0 else 'LOSS'
+            'time':     r['dt'].strftime('%m/%d %H:%M'),
+            'pnl':      r['trade_pnl'],
+            'result':   'WIN' if r['trade_pnl'] > 0 else 'LOSS',
+            'category': str(r.get('category', 'bot')).lower() if 'category' in data['df'].columns else 'bot'
         }
         for _, r in data['df'].head(50).iterrows()
     ]
@@ -135,13 +136,28 @@ def index():
 
             .pos { color: var(--green); } .neg { color: var(--red); }
             @media (max-width: 768px) { .column { min-width: 100%; } }
+
+            .badge-bot    { background: rgba(88,166,255,0.15); color: var(--blue);  border: 1px solid rgba(88,166,255,0.3);  border-radius: 4px; padding: 2px 7px; font-size: 10px; font-weight: bold; }
+            .badge-manual { background: rgba(210,153,34,0.15); color: var(--gold);  border: 1px solid rgba(210,153,34,0.3);  border-radius: 4px; padding: 2px 7px; font-size: 10px; font-weight: bold; }
+
+            @keyframes pulse-dot {
+                0%, 100% { opacity: 1; }
+                50%       { opacity: 0.35; }
+            }
+            .pulse-dot { display: inline-block; animation: pulse-dot 2s ease-in-out infinite; }
+
+            @keyframes pulse-glow {
+                0%, 100% { text-shadow: 0 0 4px rgba(63,185,80,0.4); opacity: 1; }
+                50%       { text-shadow: 0 0 12px rgba(63,185,80,0.9); opacity: 0.75; }
+            }
+            .status { color: var(--green); font-size: 11px; font-weight: bold; text-transform: uppercase; margin-top: 5px; animation: pulse-glow 2s ease-in-out infinite; }
         </style>
         <meta http-equiv="refresh" content="30">
     </head>
     <body>
         <div class="header">
-            <h1>Mystic Bot</h1>
-            <div class="status">● LIVE & PROTECTED</div>
+            <h1>Mystic Trader</h1>
+            <div class="status"><span class="pulse-dot">●</span> LIVE &amp; TRADING</div>
         </div>
 
         <div class="active-banner">
@@ -188,13 +204,20 @@ def index():
                 <div class="section-title">Recent Trades (last 50)</div>
                 <div class="panel table-container">
                     <table>
-                        <thead><tr><th>Time</th><th>PNL</th><th>Result</th></tr></thead>
+                        <thead><tr><th>Time</th><th>PNL</th><th>Result</th><th>Type</th></tr></thead>
                         <tbody>
                             {% for row in trades %}
                             <tr>
                                 <td>{{ row.time }}</td>
                                 <td class="{{ 'pos' if row.pnl > 0 else 'neg' }}">${{ "%.2f"|format(row.pnl) }}</td>
                                 <td class="{{ 'pos' if row.pnl > 0 else 'neg' }}" style="font-weight:bold;">{{ row.result }}</td>
+                                <td>
+                                    {% if row.category == 'manual' %}
+                                    <span class="badge-manual">Manual</span>
+                                    {% else %}
+                                    <span class="badge-bot">Bot</span>
+                                    {% endif %}
+                                </td>
                             </tr>
                             {% endfor %}
                         </tbody>
