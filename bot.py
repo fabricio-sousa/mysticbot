@@ -337,7 +337,6 @@ if __name__ == "__main__":
                     side, price = ("yes", y_p) if 93 <= y_p <= 98 else ("no", n_p)
 
                     rsi_low, rsi_high = get_rsi_limits()
-                    global _last_skip_reason
                     if current_volatility >= VOLATILITY_LIMIT:
                         reason = f"VOL ${current_volatility:.0f}"
                         if _last_skip_reason != reason:
