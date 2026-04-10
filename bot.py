@@ -29,6 +29,7 @@ SAFETY_FLOOR = 1000.0
 STRIKE_LIMIT = 3
 STOP_LOSS_THRESHOLD = 0.40
 OVERRIDE_TRIGGERED = False
+_last_skip_reason  = None   # suppress repeated skip log spam
 SESSION_PNL = 0.00
 
 # --- RSI ---
@@ -227,7 +228,7 @@ def place_order(ticker, side, count, action, price_cents=None):
 
 # ====================== MAIN LOOP ======================
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.3.5 Active (Time-Aware RSI + Vol Guard)")
+    log("🪄 Magick Bot v5.3.6 Active (Clean Logs)")
 
     while True:
         try:
@@ -249,6 +250,7 @@ if __name__ == "__main__":
                 state["current_trade"] = None
                 save_state(state)
                 OVERRIDE_TRIGGERED = False
+_last_skip_reason  = None   # suppress repeated skip log spam
 
             if cash <= SAFETY_FLOOR or state.get("strikes", 0) >= STRIKE_LIMIT:
                 log(f"🚨 Shutdown: Cash ${cash:.2f} | Strikes {state.get('strikes')}")
@@ -335,13 +337,24 @@ if __name__ == "__main__":
                     side, price = ("yes", y_p) if 93 <= y_p <= 98 else ("no", n_p)
 
                     rsi_low, rsi_high = get_rsi_limits()
+                    global _last_skip_reason
                     if current_volatility >= VOLATILITY_LIMIT:
-                        log(f"⏭️ Skipping {side.upper()}: volatility ${current_volatility:.0f} exceeds limit ${VOLATILITY_LIMIT}.")
+                        reason = f"VOL ${current_volatility:.0f}"
+                        if _last_skip_reason != reason:
+                            log(f"⏭️ Skipping {side.upper()}: volatility ${current_volatility:.0f} exceeds limit ${VOLATILITY_LIMIT}.")
+                            _last_skip_reason = reason
                     elif current_rsi < rsi_low:
-                        log(f"⏭️ Skipping {side.upper()}: RSI={current_rsi} below {rsi_low} (window limit).")
+                        reason = f"RSI_LOW {current_rsi}"
+                        if _last_skip_reason != reason:
+                            log(f"⏭️ Skipping {side.upper()}: RSI={current_rsi} below {rsi_low} (window limit).")
+                            _last_skip_reason = reason
                     elif current_rsi > rsi_high:
-                        log(f"⏭️ Skipping {side.upper()}: RSI={current_rsi} above {rsi_high} (window limit).")
+                        reason = f"RSI_HIGH {current_rsi}"
+                        if _last_skip_reason != reason:
+                            log(f"⏭️ Skipping {side.upper()}: RSI={current_rsi} above {rsi_high} (window limit).")
+                            _last_skip_reason = reason
                     else:
+                        _last_skip_reason = None
                         qty = int(min(MAX_POSITION_DOLLARS, (cash * risk_decimal)) * 100 // price)
                         if qty >= 1:
                             log(f"⚡ Pursuit: {side.upper()} @ {price}c (Qty: {qty}) | RSI: {current_rsi}")
