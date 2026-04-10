@@ -100,6 +100,7 @@ def get_dynamic_risk(cash: float = 0):
         if 10.5 <= time_float < 12.0: return tier["high"],      True              # High confidence open
         if 12.0 <= time_float < 16.0: return tier["mid"],       True              # Balanced midday
         if 16.5 <= time_float < 17.5: return tier["high"],      True              # Primary close window
+        if 17.5 <= time_float < 22.0: return tier["weekend"],   True              # Evening — low activity, reduced risk
         if 22.0 <= time_float < 24.0: return tier["overnight"], True              # Asian open
 
     elif day == 5:                                                                 # Saturday
@@ -108,7 +109,7 @@ def get_dynamic_risk(cash: float = 0):
     elif day == 6:                                                                 # Sunday
         if 12.0 <= time_float < 17.0: return tier["weekend"],   True
 
-    return tier["mid"], True   # Standby
+    return tier["weekend"], True   # All other standby — reduced risk
 
 # ====================== RSI ======================
 def get_btc_rsi() -> float:
@@ -256,7 +257,7 @@ _last_skip_reason  = None   # tracks last skip reason to suppress log spam
 _rsi_stable_ticks  = 0      # counts consecutive ticks with RSI in safe zone
 
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.4.1 Active (Market HB)")
+    log("🪄 Magick Bot v5.4.2 Active (Evening Risk Reduction)")
 
     while True:
         try:
