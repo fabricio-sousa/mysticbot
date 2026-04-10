@@ -24,8 +24,8 @@ STATE_FILE = os.path.join(BASE_DIR, "state.json")
 TRADES_FILE = os.path.join(BASE_DIR, "trades.json")
 
 MAX_SLIPPAGE = 2
-MAX_POSITION_DOLLARS = 500.0
-SAFETY_FLOOR = 1000.0
+MAX_POSITION_DOLLARS = 500.0   # hard cap per trade regardless of balance
+SAFETY_FLOOR = 1.0             # bot keeps running until balance hits $1
 STRIKE_LIMIT = 3
 STOP_LOSS_THRESHOLD = 0.40
 OVERRIDE_TRIGGERED = False
@@ -67,27 +67,48 @@ VOLATILITY_CANDLES = 5
 VOLATILITY_LIMIT   = 300  # dollars
 
 # ====================== DYNAMIC RISK ENGINE ======================
-def get_dynamic_risk():
+# Balance-based risk tiers — automatically scales down as balance grows.
+# Each tier defines (overnight, us_high, us_mid, weekend) risk multipliers.
+# Pre-market is always skipped regardless of tier.
+def get_balance_tier(cash: float) -> dict:
+    if cash < 300:
+        # Recovery mode — aggressive growth, small absolute risk
+        return {"overnight": 0.25, "high": 0.25, "mid": 0.25, "weekend": 0.25, "label": "Recovery (<$300)"}
+    elif cash < 600:
+        # Building mode — still aggressive but with more to protect
+        return {"overnight": 0.15, "high": 0.15, "mid": 0.12, "weekend": 0.12, "label": "Building (<$600)"}
+    elif cash < 1500:
+        # Growth mode — balanced, original proven settings
+        return {"overnight": 0.10, "high": 0.15, "mid": 0.10, "weekend": 0.08, "label": "Growth (<$1500)"}
+    elif cash < 5000:
+        # Established mode — more conservative, protect larger balance
+        return {"overnight": 0.08, "high": 0.12, "mid": 0.08, "weekend": 0.06, "label": "Established (<$5000)"}
+    else:
+        # Mature mode — capital preservation priority
+        return {"overnight": 0.05, "high": 0.10, "mid": 0.07, "weekend": 0.05, "label": "Mature ($5000+)"}
+
+def get_dynamic_risk(cash: float = 0):
     tz = pytz.timezone("US/Eastern")
     now = datetime.now(tz)
     day = now.weekday()   # 0=Mon ... 5=Sat, 6=Sun
     time_float = now.hour + (now.minute / 60.0)
+    tier = get_balance_tier(cash)
 
-    if 0 <= day <= 4:                                          # Monday - Friday
-        if  0.0 <= time_float <  5.0: return 0.05, True       # Overnight
-        if  5.0 <= time_float <  8.5: return 0.01, False      # Pre-market — skip (high volatility)
-        if 10.5 <= time_float < 12.0: return 0.15, True       # High confidence open
-        if 12.0 <= time_float < 16.0: return 0.10, True       # Balanced midday
-        if 16.5 <= time_float < 17.5: return 0.15, True       # Primary close window
-        if 22.0 <= time_float < 24.0: return 0.03, True       # Asian open
+    if 0 <= day <= 4:                                                              # Monday - Friday
+        if  0.0 <= time_float <  5.0: return tier["overnight"], True              # Overnight
+        if  5.0 <= time_float <  8.5: return 0.01, False                          # Pre-market — always skip
+        if 10.5 <= time_float < 12.0: return tier["high"],      True              # High confidence open
+        if 12.0 <= time_float < 16.0: return tier["mid"],       True              # Balanced midday
+        if 16.5 <= time_float < 17.5: return tier["high"],      True              # Primary close window
+        if 22.0 <= time_float < 24.0: return tier["overnight"], True              # Asian open
 
-    elif day == 5:                                             # Saturday
-        if 10.0 <= time_float < 17.0: return 0.05, True       # Saturday daytime
+    elif day == 5:                                                                 # Saturday
+        if 10.0 <= time_float < 17.0: return tier["weekend"],   True
 
-    elif day == 6:                                             # Sunday
-        if 12.0 <= time_float < 17.0: return 0.05, True       # Sunday afternoon
+    elif day == 6:                                                                 # Sunday
+        if 12.0 <= time_float < 17.0: return tier["weekend"],   True
 
-    return 0.01, True   # Standby
+    return tier["mid"], True   # Standby
 
 # ====================== RSI ======================
 def get_btc_rsi() -> float:
@@ -235,7 +256,7 @@ _last_skip_reason  = None   # tracks last skip reason to suppress log spam
 _rsi_stable_ticks  = 0      # counts consecutive ticks with RSI in safe zone
 
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.3.9 Active (RSI Recovery Cooldown)")
+    log("🪄 Magick Bot v5.4.1 Active (Market HB)")
 
     while True:
         try:
@@ -248,7 +269,7 @@ if __name__ == "__main__":
             state = load_state()
             cash = client.get_balance().balance / 100.0
             curr = state.get("current_trade")
-            risk_decimal, is_trading_window = get_dynamic_risk()
+            risk_decimal, is_trading_window = get_dynamic_risk(cash)
             current_rsi        = get_btc_rsi()
             current_volatility = get_btc_volatility()
 
@@ -305,10 +326,22 @@ if __name__ == "__main__":
                     continue
 
             # --- HEARTBEAT ---
-            status_text = f" [IN: {curr['side'].upper()} @ {curr.get('actual_entry_price')}c]" if curr else ""
+            tier_label = get_balance_tier(cash)["label"]
             vol_flag = " ⚠️VOL" if current_volatility >= VOLATILITY_LIMIT else ""
-            hb = f"[{now_et.strftime('%H:%M:%S')}] Risk: {int(risk_decimal*100)}% | RSI: {current_rsi} | Vol: ${current_volatility:.0f}{vol_flag} | Cash: ${cash:.2f} | Session: ${SESSION_PNL:+.2f}{status_text}"
-            print(f"\r{hb:<120}", end="", flush=True)
+            # Market prices for heartbeat display
+            if markets:
+                y_disp = f"{y_p}c" if 0 < y_p <= 99 else "--"
+                n_disp = f"{n_p}c" if 0 < n_p <= 99 else "--"
+                tl_disp = f"{time_left:.1f}m"
+                mkt_str = f" | Y:{y_disp} N:{n_disp} {tl_disp}"
+            else:
+                mkt_str = " | no market"
+            if curr:
+                status_text = f" [IN: {curr['side'].upper()} @ {curr.get('actual_entry_price')}c]"
+            else:
+                status_text = ""
+            hb = f"[{now_et.strftime('%H:%M:%S')}] {tier_label} | Risk: {int(risk_decimal*100)}% | RSI: {current_rsi} | Vol: ${current_volatility:.0f}{vol_flag}{mkt_str} | Cash: ${cash:.2f} | Session: ${SESSION_PNL:+.2f}{status_text}"
+            print(f"\r{hb:<160}", end="", flush=True)
 
             if not is_trading_window and not curr:
                 time.sleep(10)
