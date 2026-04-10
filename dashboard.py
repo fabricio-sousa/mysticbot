@@ -121,7 +121,7 @@ def get_log_lines(n=80):
         if '⚠️ Entry failed' in line:
             return ('⚠️', "Entry failed — 15s cooldown", 'log-error')
         if '⚠️' in line or '❌' in line:
-            clean = re.sub(r'\[.*?\ET\]\s*', '', line)
+            clean = re.sub(r'\[.*? ET\]\s*', '', line)
             clean = re.sub(r'HTTP response.*', '', clean).strip()
             return ('⚠️', clean[:120], 'log-error')
         return None
