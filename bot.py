@@ -229,7 +229,7 @@ def place_order(ticker, side, count, action, price_cents=None):
 _last_skip_reason = None   # tracks last skip reason to suppress log spam
 
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.3.6 Active (Clean Logs)")
+    log("🪄 Magick Bot v5.3.7 Active (409 Fix + Clean HB)")
 
     while True:
         try:
@@ -276,11 +276,17 @@ if __name__ == "__main__":
 
                 if 0 < live_bid <= stop_p and time_left > 0.5:
                     log(f"🚨 STOP LOSS: Selling {curr['ticker']} (Live: {live_bid}c | SL: {stop_p}c)")
-                    # FIX: Clear trade immediately before placing sell order
-                    # so a second loop tick can't fire another stop while sell is in flight
                     state["current_trade"] = None
                     save_state(state)
                     success, actual_sell, _ = place_order(curr['ticker'], curr['side'], curr['count'], "sell", live_bid)
+                    if not success or actual_sell == 0:
+                        # 409 = market already closed/settling — let settlement handle PnL
+                        log(f"⚠️ Stop-loss sell rejected (market may have closed) — awaiting settlement.")
+                        state["strikes"] = state.get("strikes", 0) + 1
+                        save_state(state)
+                        play_sound("stop")
+                        time.sleep(60)
+                        continue
                     pnl = (actual_sell - entry_p) * curr['count'] / 100.0
                     update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "STOP_LOSS"})
                     SESSION_PNL += pnl
@@ -295,7 +301,8 @@ if __name__ == "__main__":
             # --- HEARTBEAT ---
             status_text = f" [IN: {curr['side'].upper()} @ {curr.get('actual_entry_price')}c]" if curr else ""
             vol_flag = " ⚠️VOL" if current_volatility >= VOLATILITY_LIMIT else ""
-            print(f"\r[{now_et.strftime('%H:%M:%S')}] Risk: {int(risk_decimal*100)}% | RSI: {current_rsi} | Vol: ${current_volatility:.0f}{vol_flag} | Cash: ${cash:.2f} | Session: ${SESSION_PNL:+.2f}{status_text}", end="")
+            hb = f"[{now_et.strftime('%H:%M:%S')}] Risk: {int(risk_decimal*100)}% | RSI: {current_rsi} | Vol: ${current_volatility:.0f}{vol_flag} | Cash: ${cash:.2f} | Session: ${SESSION_PNL:+.2f}{status_text}"
+            print(f"\r{hb:<120}", end="", flush=True)
 
             if not is_trading_window and not curr:
                 time.sleep(10)
