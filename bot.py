@@ -229,7 +229,7 @@ def place_order(ticker, side, count, action, price_cents=None):
 _last_skip_reason = None   # tracks last skip reason to suppress log spam
 
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.3.7 Active (409 Fix + Clean HB)")
+    log("🪄 Magick Bot v5.3.8 Active (Skip Dedup Fix)")
 
     while True:
         try:
@@ -345,20 +345,17 @@ if __name__ == "__main__":
 
                     rsi_low, rsi_high = get_rsi_limits()
                     if current_volatility >= VOLATILITY_LIMIT:
-                        reason = f"VOL ${current_volatility:.0f}"
-                        if _last_skip_reason != reason:
+                        if _last_skip_reason != "VOL":
                             log(f"⏭️ Skipping {side.upper()}: volatility ${current_volatility:.0f} exceeds limit ${VOLATILITY_LIMIT}.")
-                            _last_skip_reason = reason
+                            _last_skip_reason = "VOL"
                     elif current_rsi < rsi_low:
-                        reason = f"RSI_LOW {current_rsi}"
-                        if _last_skip_reason != reason:
+                        if _last_skip_reason != "RSI_LOW":
                             log(f"⏭️ Skipping {side.upper()}: RSI={current_rsi} below {rsi_low} (window limit).")
-                            _last_skip_reason = reason
+                            _last_skip_reason = "RSI_LOW"
                     elif current_rsi > rsi_high:
-                        reason = f"RSI_HIGH {current_rsi}"
-                        if _last_skip_reason != reason:
+                        if _last_skip_reason != "RSI_HIGH":
                             log(f"⏭️ Skipping {side.upper()}: RSI={current_rsi} above {rsi_high} (window limit).")
-                            _last_skip_reason = reason
+                            _last_skip_reason = "RSI_HIGH"
                     else:
                         _last_skip_reason = None
                         qty = int(min(MAX_POSITION_DOLLARS, (cash * risk_decimal)) * 100 // price)
