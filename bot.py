@@ -55,6 +55,11 @@ def get_rsi_limits() -> tuple:
     if 22.0 <= tf <  24.0:                     return RSI_LIMITS_BY_WINDOW["asian_open"]
     return RSI_LIMITS_BY_WINDOW["default"]
 
+# RSI recovery cooldown — if RSI was in extreme territory recently,
+# wait for it to stay in the safe zone for this many consecutive ticks
+# before allowing an entry. Prevents the "dead cat bounce" trap.
+RSI_RECOVERY_TICKS = 4   # ~4 seconds of stable RSI required after extreme
+
 # --- Volatility guard ---
 # Max allowed BTC price range over last 5 candles before skipping entry.
 # A $300+ move in 5 minutes signals a breakout/breakdown — avoid chasing.
@@ -226,10 +231,11 @@ def place_order(ticker, side, count, action, price_cents=None):
         return False, 0, 0
 
 # ====================== MAIN LOOP ======================
-_last_skip_reason = None   # tracks last skip reason to suppress log spam
+_last_skip_reason  = None   # tracks last skip reason to suppress log spam
+_rsi_stable_ticks  = 0      # counts consecutive ticks with RSI in safe zone
 
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.3.8 Active (Skip Dedup Fix)")
+    log("🪄 Magick Bot v5.3.9 Active (RSI Recovery Cooldown)")
 
     while True:
         try:
@@ -345,17 +351,25 @@ if __name__ == "__main__":
 
                     rsi_low, rsi_high = get_rsi_limits()
                     if current_volatility >= VOLATILITY_LIMIT:
+                        _rsi_stable_ticks = 0
                         if _last_skip_reason != "VOL":
                             log(f"⏭️ Skipping {side.upper()}: volatility ${current_volatility:.0f} exceeds limit ${VOLATILITY_LIMIT}.")
                             _last_skip_reason = "VOL"
                     elif current_rsi < rsi_low:
+                        _rsi_stable_ticks = 0
                         if _last_skip_reason != "RSI_LOW":
                             log(f"⏭️ Skipping {side.upper()}: RSI={current_rsi} below {rsi_low} (window limit).")
                             _last_skip_reason = "RSI_LOW"
                     elif current_rsi > rsi_high:
+                        _rsi_stable_ticks = 0
                         if _last_skip_reason != "RSI_HIGH":
                             log(f"⏭️ Skipping {side.upper()}: RSI={current_rsi} above {rsi_high} (window limit).")
                             _last_skip_reason = "RSI_HIGH"
+                    elif _rsi_stable_ticks < RSI_RECOVERY_TICKS:
+                        _rsi_stable_ticks += 1
+                        if _last_skip_reason != "RSI_RECOVERY":
+                            log(f"⏭️ Skipping {side.upper()}: RSI recovery cooldown ({_rsi_stable_ticks}/{RSI_RECOVERY_TICKS} ticks stable).")
+                            _last_skip_reason = "RSI_RECOVERY"
                     else:
                         _last_skip_reason = None
                         qty = int(min(MAX_POSITION_DOLLARS, (cash * risk_decimal)) * 100 // price)
