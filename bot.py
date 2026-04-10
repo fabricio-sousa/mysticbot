@@ -29,7 +29,6 @@ SAFETY_FLOOR = 1000.0
 STRIKE_LIMIT = 3
 STOP_LOSS_THRESHOLD = 0.40
 OVERRIDE_TRIGGERED = False
-_last_skip_reason  = None   # suppress repeated skip log spam
 SESSION_PNL = 0.00
 
 # --- RSI ---
@@ -227,6 +226,8 @@ def place_order(ticker, side, count, action, price_cents=None):
         return False, 0, 0
 
 # ====================== MAIN LOOP ======================
+_last_skip_reason = None   # tracks last skip reason to suppress log spam
+
 if __name__ == "__main__":
     log("🪄 Magick Bot v5.3.6 Active (Clean Logs)")
 
@@ -250,7 +251,6 @@ if __name__ == "__main__":
                 state["current_trade"] = None
                 save_state(state)
                 OVERRIDE_TRIGGERED = False
-_last_skip_reason  = None   # suppress repeated skip log spam
 
             if cash <= SAFETY_FLOOR or state.get("strikes", 0) >= STRIKE_LIMIT:
                 log(f"🚨 Shutdown: Cash ${cash:.2f} | Strikes {state.get('strikes')}")
