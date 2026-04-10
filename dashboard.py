@@ -59,6 +59,7 @@ STRATEGY_SCHEDULE = [
     {"days": "Mon-Fri", "range": range(0, 5), "start": 1030, "end": 1200, "time_str": "10:30am–12:00pm","risk_key": "high",      "label": "High Confidence"},
     {"days": "Mon-Fri", "range": range(0, 5), "start": 1200, "end": 1600, "time_str": "12:00pm–4:00pm", "risk_key": "mid",       "label": "Balanced Midday"},
     {"days": "Mon-Fri", "range": range(0, 5), "start": 1630, "end": 1730, "time_str": "4:30pm–5:30pm",  "risk_key": "high",      "label": "Primary Window"},
+    {"days": "Mon-Fri", "range": range(0, 5), "start": 1730, "end": 2200, "time_str": "5:30pm–10:00pm", "risk_key": "fixed_5",   "label": "Evening (Reduced)"},
     {"days": "Mon-Fri", "range": range(0, 5), "start": 2200, "end": 2400, "time_str": "10:00pm–12:00am","risk_key": "overnight", "label": "Asian Open"},
     {"days": "Saturday","range": [5],         "start": 1000, "end": 1700, "time_str": "Sat 10am–5pm",   "risk_key": "weekend",   "label": "Saturday"},
     {"days": "Sunday",  "range": [6],         "start": 1200, "end": 1700, "time_str": "Sun 12pm–5pm",   "risk_key": "weekend",   "label": "Sunday Afternoon"},
@@ -210,19 +211,8 @@ def index():
     data        = get_financial_data()
     current_win = get_current_window()
     log_entries = get_log_lines(80)
-    # Read last known cash from log.txt for accurate tier display
-    last_cash = 0.0
-    try:
-        import re as _re
-        with open(LOG_FILE, 'r', encoding='utf-8', errors='replace') as _lf:
-            for line in reversed(_lf.readlines()):
-                m = _re.search(r'Cash: \\$([\d.]+)', line)
-                if m:
-                    last_cash = float(m.group(1))
-                    break
-    except Exception:
-        last_cash = data.get('total_pnl', 0) if "error" not in data else 0
-    current_tier = get_tier_for_balance(last_cash) if "error" not in data else BALANCE_TIERS[0]
+    # Hardcoded to Growth tier
+    current_tier = get_tier_for_balance(1000)
 
     if "error" in data:
         return f"<body style='background:#0d1117;color:white;padding:50px;'><h2>⚠️ Data Error</h2><p>{data['error']}</p></body>"
@@ -320,7 +310,6 @@ def index():
 
         <div class="active-banner">
             <div><div class="banner-label">Active Block</div><div class="banner-val">{{ window.label }}</div></div>
-            <div><div class="banner-label">Risk Tier</div><div class="banner-val" style="color:var(--gold)">{{ tier.label }}</div></div>
             <div><div class="banner-label">Current Risk</div><div class="banner-val" style="color:var(--green)">{{ current_risk }}</div></div>
         </div>
 
@@ -338,11 +327,7 @@ def index():
                 <span class="card-val pos">{{ "%.1f"|format(win_rate) }}%</span>
                 <div class="card-sub">{{ wins }}W / {{ total_trades - wins }}L ({{ total_trades }} total)</div>
             </div>
-            <div class="card">
-                <span class="card-label">Risk Tier</span>
-                <span class="card-val" style="font-size:13px; color:var(--gold)">{{ tier.label }}</span>
-                <div class="card-sub">H:{{ tier.high }} | M:{{ tier.mid }} | ON:{{ tier.overnight }}</div>
-            </div>
+
         </div>
 
         <div class="main-layout">
@@ -352,7 +337,7 @@ def index():
                     {% for s in schedule %}
                     <div class="row {% if s.label == window.label %}current-row{% endif %}">
                         <span style="color:var(--blue); font-weight:bold; min-width:130px;">{{ s.time_str }}</span>
-                        <span style="color:{% if s.risk_key == 'skip' %}#8b949e{% else %}var(--green){% endif %}; font-weight:bold; min-width:35px;">{{ tier[s.risk_key] if s.risk_key != 'skip' else '—' }}</span>
+                        <span style="color:{% if s.risk_key == 'skip' %}#8b949e{% else %}var(--green){% endif %}; font-weight:bold; min-width:35px;">{{ '5%' if s.risk_key == 'fixed_5' else (tier[s.risk_key] if s.risk_key != 'skip' else '—') }}</span>
                         <span style="flex:1; text-align:right;">{{ s.label }}</span>
                     </div>
                     {% endfor %}
