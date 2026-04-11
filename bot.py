@@ -41,6 +41,7 @@ RSI_PERIOD = 9
 RSI_LIMITS_BY_WINDOW = {
     "overnight":  (25, 75),   # 12AM–5AM  — Asian session, low vol, wide band
     "asian_open": (25, 75),   # 10PM–12AM — similar character to overnight
+    "evening":    (30, 70),   # 5:30PM–10PM — reduced activity, moderate band
     "weekend":    (30, 70),   # Sat/Sun   — moderate, less macro risk
     "default":    (38, 62),   # All US hours — tightest, most momentum risk
 }
@@ -53,6 +54,7 @@ def get_rsi_limits() -> tuple:
     tf  = now.hour + (now.minute / 60.0)
     if day in (5, 6):                          return RSI_LIMITS_BY_WINDOW["weekend"]
     if 0.0  <= tf <  5.0:                      return RSI_LIMITS_BY_WINDOW["overnight"]
+    if 17.5 <= tf <  22.0:                     return RSI_LIMITS_BY_WINDOW["evening"]
     if 22.0 <= tf <  24.0:                     return RSI_LIMITS_BY_WINDOW["asian_open"]
     return RSI_LIMITS_BY_WINDOW["default"]
 
