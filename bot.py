@@ -24,7 +24,8 @@ STATE_FILE = os.path.join(BASE_DIR, "state.json")
 TRADES_FILE = os.path.join(BASE_DIR, "trades.json")
 
 MAX_SLIPPAGE = 2
-MAX_POSITION_DOLLARS = 500.0   # hard cap per trade regardless of balance
+MAX_POSITION_DOLLARS = 500.0   # hard cap per trade in dollars regardless of balance
+MAX_CONTRACTS = 100            # hard cap on contracts per trade regardless of position size
 SAFETY_FLOOR = 1.0             # bot keeps running until balance hits $1
 STRIKE_LIMIT = 3
 STOP_LOSS_THRESHOLD = 0.40
@@ -257,7 +258,7 @@ _last_skip_reason  = None   # tracks last skip reason to suppress log spam
 _rsi_stable_ticks  = 0      # counts consecutive ticks with RSI in safe zone
 
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.4.3 Active (Evening 5% Fixed)")
+    log("🪄 Magick Bot v5.4.4 Active (100 Contract Cap)")
 
     while True:
         try:
@@ -407,6 +408,7 @@ if __name__ == "__main__":
                     else:
                         _last_skip_reason = None
                         qty = int(min(MAX_POSITION_DOLLARS, (cash * risk_decimal)) * 100 // price)
+                        qty = min(qty, MAX_CONTRACTS)
                         if qty >= 1:
                             log(f"⚡ Pursuit: {side.upper()} @ {price}c (Qty: {qty}) | RSI: {current_rsi}")
                             success, actual_paid, filled_qty = place_order(market.ticker, side, qty, "buy", price)
