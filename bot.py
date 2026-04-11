@@ -112,7 +112,7 @@ def get_dynamic_risk(cash: float = 0):
     elif day == 6:                                                                 # Sunday
         if 12.0 <= time_float < 17.0: return tier["weekend"],   True
 
-    return tier["weekend"], True   # All other standby — reduced risk
+    return 0.05, True   # All other standby — fixed 5%
 
 # ====================== RSI ======================
 def get_btc_rsi() -> float:
@@ -260,7 +260,7 @@ _last_skip_reason  = None   # tracks last skip reason to suppress log spam
 _rsi_stable_ticks  = 0      # counts consecutive ticks with RSI in safe zone
 
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.4.4 Active (100 Contract Cap)")
+    log("🪄 Magick Bot v5.4.5 Active (5% Auto-Pilot)")
 
     while True:
         try:

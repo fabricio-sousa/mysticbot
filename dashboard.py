@@ -343,7 +343,7 @@ def index():
                     {% endfor %}
                     <div class="row {% if window.label == 'Auto-Pilot (Passive)' %}current-row{% endif %}">
                         <span style="color:#8b949e; min-width:130px;">All other times</span>
-                        <span style="color:var(--gold); min-width:35px;">{{ tier.mid }}</span>
+                        <span style="color:var(--gold); min-width:35px;">5%</span>
                         <span style="flex:1; text-align:right;">Auto-Pilot</span>
                     </div>
                 </div>
