@@ -103,18 +103,18 @@ def get_dynamic_risk(cash: float = 0):
         if 10.5 <= time_float < 12.0: return tier["high"],      True              # High confidence open
         if 12.0 <= time_float < 16.0: return tier["mid"],       True              # Balanced midday
         if 16.5 <= time_float < 17.5: return tier["high"],      True              # Primary close window
-        if 17.5 <= time_float < 22.0: return 0.05,            True              # Evening — low activity, fixed 5%
-        if 22.0 <= time_float < 24.0: return tier["overnight"], True              # Asian open
+        if 22.0 <= time_float < 24.0: return tier["overnight"], True              # Asian open (7-day)
 
     elif day == 5:                                                                 # Saturday
-        if  0.0 <= time_float < 10.0: return tier["overnight"], True              # Sat early morning — overnight rate
+        if  0.0 <= time_float < 10.0: return tier["overnight"], True              # Sat overnight
         if 10.0 <= time_float < 17.0: return tier["weekend"],   True              # Sat daytime
+        if 22.0 <= time_float < 24.0: return tier["overnight"], True              # Sat Asian open
 
     elif day == 6:                                                                 # Sunday
-        if  0.0 <= time_float < 12.0: return tier["weekend"],   True              # Sun early morning — weekend rate
-        if 12.0 <= time_float < 17.0: return tier["weekend"],   True              # Sun afternoon
+        if  0.0 <= time_float < 17.0: return tier["weekend"],   True              # Sun all day
+        if 22.0 <= time_float < 24.0: return tier["overnight"], True              # Sun Asian open
 
-    return 0.05, True   # All other standby — fixed 5%
+    return 0.01, False   # All other times — skip
 
 # ====================== RSI ======================
 def get_btc_rsi() -> float:
@@ -263,7 +263,7 @@ _rsi_stable_ticks  = 0      # counts consecutive ticks with RSI in safe zone
 _entry_lock        = False  # in-memory lock prevents double-buy race condition
 
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.4.7 Active (Weekend Overnight)")
+    log("🪄 Magick Bot v5.4.8 Active (Clean Schedule)")
 
     while True:
         try:
