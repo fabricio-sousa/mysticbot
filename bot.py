@@ -25,7 +25,7 @@ TRADES_FILE = os.path.join(BASE_DIR, "trades.json")
 
 MAX_SLIPPAGE = 2
 MAX_POSITION_DOLLARS = 500.0   # hard cap per trade in dollars regardless of balance
-MAX_CONTRACTS = 100            # hard cap on contracts per trade regardless of position size
+MAX_CONTRACTS = 150            # hard cap on contracts per trade regardless of position size
 SAFETY_FLOOR = 600.0          # bot shuts down if balance drops below $1200
 STRIKE_LIMIT = 3
 STOP_LOSS_THRESHOLD = 0.40
