@@ -304,6 +304,63 @@ if __name__ == "__main__":
             else:
                 time_left = 0
 
+            # --- MANUAL TRADE TRIGGER (T key) ---
+            if _manual_trade_trigger and markets:
+                _manual_trade_trigger = False
+                # If there's an active trade, sell it first before entering manual
+                if curr and curr.get("status") == "filled":
+                    log(f"🖐️ Manual: selling existing {curr['side'].upper()} position first...")
+                    m_curr = client.get_market(curr['ticker']).market
+                    curr_bid = safe_price_cents(m_curr.yes_bid_dollars if curr['side'] == "yes" else m_curr.no_bid_dollars)
+                    sell_ok, sell_price, sell_qty = place_order(curr['ticker'], curr['side'], curr['count'], "sell", curr_bid)
+                    if sell_ok and sell_price > 0:
+                        sell_proceeds = sell_price * sell_qty / 100.0
+                        buy_cost      = curr['actual_entry_price'] * curr['count'] / 100.0
+                        exit_pnl      = sell_proceeds - buy_cost
+                        SESSION_PNL  += exit_pnl
+                        update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(exit_pnl, 2), "type": "MANUAL_EXIT", "category": curr.get("category", "bot")})
+                        log(f"🖐️ Existing position sold @ {sell_price}c. PnL: ${exit_pnl:+.2f}")
+                    else:
+                        log("⚠️ Manual: could not sell existing position — market may be closing. Aborting manual entry.")
+                        state["current_trade"] = None
+                        save_state(state)
+                        curr = None
+                        time.sleep(1)
+                        continue
+                    state["current_trade"] = None
+                    save_state(state)
+                    curr = None
+                # Now enter the manual trade
+                try:
+                    fresh_m = client.get_market(market.ticker).market
+                    y_p_m   = safe_price_cents(fresh_m.yes_bid_dollars)
+                    n_p_m   = safe_price_cents(fresh_m.no_bid_dollars)
+                    tl_m    = (fresh_m.close_time - now_et).total_seconds() / 60.0
+                    if 2.0 <= tl_m <= 6.0 and (93 <= y_p_m <= 98 or 93 <= n_p_m <= 98):
+                        side_m  = "yes" if 93 <= y_p_m <= 98 else "no"
+                        price_m = y_p_m if side_m == "yes" else n_p_m
+                        qty_m   = min(int((cash * 0.25) * 100 // price_m), MAX_CONTRACTS)
+                        if qty_m >= 1:
+                            log(f"🖐️ Manual Trade: {side_m.upper()} @ {price_m}c (Qty: {qty_m}) | 25% risk")
+                            success_m, paid_m, filled_m = place_order(market.ticker, side_m, qty_m, "buy", price_m)
+                            if success_m and filled_m > 0:
+                                state["current_trade"] = {
+                                    "ticker": market.ticker, "side": side_m, "count": filled_m,
+                                    "entry_price_cents": paid_m, "actual_entry_price": paid_m,
+                                    "status": "filled", "category": "manual"
+                                }
+                                save_state(state)
+                                play_sound("buy")
+                                log(f"🖐️ Manual filled: {filled_m} contracts @ {paid_m}c")
+                            else:
+                                log("⚠️ Manual trade failed or zero fill.")
+                        else:
+                            log("⚠️ Manual trade: insufficient balance for 25% position.")
+                    else:
+                        log(f"⚠️ Manual trade: no qualifying contract right now (time {tl_m:.1f}m left, Y:{y_p_m}c N:{n_p_m}c).")
+                except Exception as e:
+                    log(f"⚠️ Manual trade error: {e}")
+
             # --- MONITORING / STOP LOSS ---
             if curr and curr.get("status") == "filled":
                 m_live = client.get_market(curr['ticker']).market
