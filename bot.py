@@ -271,6 +271,9 @@ if __name__ == "__main__":
                 key = msvcrt.getch()
                 if key == b'\x1b': os._exit(0)
                 elif key.lower() == b'c': OVERRIDE_TRIGGERED = True
+                elif key.lower() == b't':
+                    _manual_trade_trigger = True
+                    log("\U0001f590\ufe0f Manual trade triggered — entering next qualifying contract at 25% risk.")
 
             now_et = datetime.now(pytz.timezone("US/Eastern"))
             state = load_state()
