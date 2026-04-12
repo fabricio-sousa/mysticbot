@@ -73,7 +73,7 @@ def get_current_window():
     for window in STRATEGY_SCHEDULE:
         if day in window.get("range", []) and window["start"] <= time_int < window["end"]:
             return window
-    return {"label": "Auto-Pilot (Passive)", "risk_key": "mid"}
+    return {"label": "Standby (Skipped)", "risk_key": "skip"}
 
 def clean_val(value):
     if value is None or value == "": return 0.0
@@ -341,7 +341,7 @@ def index():
                         <span style="flex:1; text-align:right;">{{ s.label }}</span>
                     </div>
                     {% endfor %}
-                    <div class="row {% if window.label == 'Auto-Pilot (Passive)' %}current-row{% endif %}">
+                    <div class="row {% if window.label == 'Standby (Skipped)' %}current-row{% endif %}">
                         <span style="color:#8b949e; min-width:130px;">All other times</span>
                         <span style="color:#8b949e; min-width:35px;">—</span>
                         <span style="flex:1; text-align:right;">Standby (Skipped)</span>
@@ -408,7 +408,7 @@ def index():
         schedule=STRATEGY_SCHEDULE,
         log_entries=log_entries,
         tier=current_tier,
-        current_risk=current_tier.get(current_win.get('risk_key', 'mid'), '—'),
+        current_risk='—' if current_win.get('risk_key') == 'skip' else current_tier.get(current_win.get('risk_key', 'mid'), '—'),
     )
 
 if __name__ == '__main__':
