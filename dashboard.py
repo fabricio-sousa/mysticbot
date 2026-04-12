@@ -61,7 +61,9 @@ STRATEGY_SCHEDULE = [
     {"days": "Mon-Fri", "range": range(0, 5), "start": 1630, "end": 1730, "time_str": "4:30pm–5:30pm",  "risk_key": "high",      "label": "Primary Window"},
     {"days": "Mon-Fri", "range": range(0, 5), "start": 1730, "end": 2200, "time_str": "5:30pm–10:00pm", "risk_key": "fixed_5",   "label": "Evening (Reduced)"},
     {"days": "Mon-Fri", "range": range(0, 5), "start": 2200, "end": 2400, "time_str": "10:00pm–12:00am","risk_key": "overnight", "label": "Asian Open"},
+    {"days": "Saturday","range": [5],         "start":    0, "end": 1000, "time_str": "Sat 12am–10am",  "risk_key": "overnight", "label": "Saturday Overnight"},
     {"days": "Saturday","range": [5],         "start": 1000, "end": 1700, "time_str": "Sat 10am–5pm",   "risk_key": "weekend",   "label": "Saturday"},
+    {"days": "Sunday",  "range": [6],         "start":    0, "end": 1200, "time_str": "Sun 12am–12pm",  "risk_key": "weekend",   "label": "Sunday Morning"},
     {"days": "Sunday",  "range": [6],         "start": 1200, "end": 1700, "time_str": "Sun 12pm–5pm",   "risk_key": "weekend",   "label": "Sunday Afternoon"},
 ]
 

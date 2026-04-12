@@ -107,10 +107,12 @@ def get_dynamic_risk(cash: float = 0):
         if 22.0 <= time_float < 24.0: return tier["overnight"], True              # Asian open
 
     elif day == 5:                                                                 # Saturday
-        if 10.0 <= time_float < 17.0: return tier["weekend"],   True
+        if  0.0 <= time_float < 10.0: return tier["overnight"], True              # Sat early morning — overnight rate
+        if 10.0 <= time_float < 17.0: return tier["weekend"],   True              # Sat daytime
 
     elif day == 6:                                                                 # Sunday
-        if 12.0 <= time_float < 17.0: return tier["weekend"],   True
+        if  0.0 <= time_float < 12.0: return tier["weekend"],   True              # Sun early morning — weekend rate
+        if 12.0 <= time_float < 17.0: return tier["weekend"],   True              # Sun afternoon
 
     return 0.05, True   # All other standby — fixed 5%
 
@@ -261,7 +263,7 @@ _rsi_stable_ticks  = 0      # counts consecutive ticks with RSI in safe zone
 _entry_lock        = False  # in-memory lock prevents double-buy race condition
 
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.4.6 Active (Entry Lock)")
+    log("🪄 Magick Bot v5.4.7 Active (Weekend Overnight)")
 
     while True:
         try:
