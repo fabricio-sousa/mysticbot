@@ -258,9 +258,10 @@ def place_order(ticker, side, count, action, price_cents=None):
 # ====================== MAIN LOOP ======================
 _last_skip_reason  = None   # tracks last skip reason to suppress log spam
 _rsi_stable_ticks  = 0      # counts consecutive ticks with RSI in safe zone
+_entry_lock        = False  # in-memory lock prevents double-buy race condition
 
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.4.5 Active (5% Auto-Pilot)")
+    log("🪄 Magick Bot v5.4.6 Active (Entry Lock)")
 
     while True:
         try:
@@ -309,16 +310,22 @@ if __name__ == "__main__":
                     log(f"🚨 STOP LOSS: Selling {curr['ticker']} (Live: {live_bid}c | SL: {stop_p}c)")
                     state["current_trade"] = None
                     save_state(state)
-                    success, actual_sell, _ = place_order(curr['ticker'], curr['side'], curr['count'], "sell", live_bid)
+                    success, actual_sell, filled_qty = place_order(curr['ticker'], curr['side'], curr['count'], "sell", live_bid)
                     if not success or actual_sell == 0:
-                        # 409 = market already closed/settling — let settlement handle PnL
+                        # 409/404 = market already closed/settling — let settlement handle PnL
                         log(f"⚠️ Stop-loss sell rejected (market may have closed) — awaiting settlement.")
                         state["strikes"] = state.get("strikes", 0) + 1
                         save_state(state)
                         play_sound("stop")
                         time.sleep(60)
                         continue
-                    pnl = (actual_sell - entry_p) * curr['count'] / 100.0
+                    # Sanity check: if sell price deviates massively from live_bid, log a warning
+                    if abs(actual_sell - live_bid) > 20:
+                        log(f"⚠️ Sell fill ({actual_sell}c) deviates from live bid ({live_bid}c) — PnL may be inaccurate.")
+                    # PnL: sell proceeds minus buy cost, both in dollars
+                    sell_proceeds = actual_sell * filled_qty / 100.0
+                    buy_cost      = entry_p * curr['count'] / 100.0
+                    pnl = sell_proceeds - buy_cost
                     update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "STOP_LOSS"})
                     SESSION_PNL += pnl
                     state["strikes"] = state.get("strikes", 0) + 1
@@ -411,7 +418,8 @@ if __name__ == "__main__":
                         _last_skip_reason = None
                         qty = int(min(MAX_POSITION_DOLLARS, (cash * risk_decimal)) * 100 // price)
                         qty = min(qty, MAX_CONTRACTS)
-                        if qty >= 1:
+                        if qty >= 1 and not _entry_lock:
+                            _entry_lock = True
                             log(f"⚡ Pursuit: {side.upper()} @ {price}c (Qty: {qty}) | RSI: {current_rsi}")
                             success, actual_paid, filled_qty = place_order(market.ticker, side, qty, "buy", price)
                             if success and filled_qty > 0:
@@ -420,10 +428,12 @@ if __name__ == "__main__":
                                     "entry_price_cents": actual_paid, "actual_entry_price": actual_paid, "status": "filled"
                                 }
                                 save_state(state)
+                                _entry_lock = False
                                 play_sound("buy")
                                 log(f"✅ Filled: {filled_qty} contracts @ {actual_paid}c")
                                 time.sleep(5)
                             else:
+                                _entry_lock = False
                                 log("⚠️ Entry failed or zero fill. 15s Cooldown...")
                                 time.sleep(15)
 
