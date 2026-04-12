@@ -258,12 +258,13 @@ def place_order(ticker, side, count, action, price_cents=None):
         return False, 0, 0
 
 # ====================== MAIN LOOP ======================
-_last_skip_reason  = None   # tracks last skip reason to suppress log spam
-_rsi_stable_ticks  = 0      # counts consecutive ticks with RSI in safe zone
-_entry_lock        = False  # in-memory lock prevents double-buy race condition
+_last_skip_reason      = None   # tracks last skip reason to suppress log spam
+_rsi_stable_ticks      = 0      # counts consecutive ticks with RSI in safe zone
+_entry_lock            = False  # in-memory lock prevents double-buy race condition
+_manual_trade_trigger  = False  # T key pressed — place one manual trade at 25% this session
 
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.4.8 Active (Clean Schedule)")
+    log("🪄 Magick Bot v5.4.9 Active (Manual Trade Key)")
 
     while True:
         try:
