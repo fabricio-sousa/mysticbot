@@ -25,8 +25,8 @@ TRADES_FILE = os.path.join(BASE_DIR, "trades.json")
 
 MAX_SLIPPAGE = 2
 MAX_POSITION_DOLLARS = 500.0   # hard cap per trade in dollars regardless of balance
-MAX_CONTRACTS = 150            # hard cap on contracts per trade regardless of position size
-SAFETY_FLOOR = 1200.0          # bot shuts down if balance drops below $1200
+MAX_CONTRACTS = 100            # hard cap on contracts per trade regardless of position size
+SAFETY_FLOOR = 1000.0          # bot shuts down if balance drops below $1200
 STRIKE_LIMIT = 3
 STOP_LOSS_THRESHOLD = 0.40
 OVERRIDE_TRIGGERED = False
@@ -337,8 +337,8 @@ if __name__ == "__main__":
                     y_p_m   = safe_price_cents(fresh_m.yes_bid_dollars)
                     n_p_m   = safe_price_cents(fresh_m.no_bid_dollars)
                     tl_m    = (fresh_m.close_time - now_et).total_seconds() / 60.0
-                    if 2.0 <= tl_m <= 6.0 and (93 <= y_p_m <= 98 or 93 <= n_p_m <= 98):
-                        side_m  = "yes" if 93 <= y_p_m <= 98 else "no"
+                    if 2.0 <= tl_m <= 4.5 and (95 <= y_p_m <= 98 or 95 <= n_p_m <= 98):
+                        side_m  = "yes" if 95 <= y_p_m <= 98 else "no"
                         price_m = y_p_m if side_m == "yes" else n_p_m
                         qty_m   = min(int((cash * 0.25) * 100 // price_m), MAX_CONTRACTS)
                         if qty_m >= 1:
@@ -433,7 +433,7 @@ if __name__ == "__main__":
                     won = (curr['side'] == res)
                     entry_p = curr['actual_entry_price']
                     pnl = (100 - entry_p) * curr['count'] / 100.0 if won else -(entry_p * curr['count'] / 100.0)
-                    update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "SETTLEMENT"})
+                    update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "SETTLEMENT", "category": curr.get("category", "bot")})
                     SESSION_PNL += pnl
                     log(f"🏁 RESULT: {res.upper()} | {'WIN' if won else 'LOSS'} | PnL: ${pnl:+.2f}")
                     state["strikes"] = 0 if won else state.get("strikes", 0) + 1
