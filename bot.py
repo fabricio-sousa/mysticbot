@@ -26,7 +26,7 @@ TRADES_FILE = os.path.join(BASE_DIR, "trades.json")
 MAX_SLIPPAGE = 2
 MAX_POSITION_DOLLARS = 500.0   # hard cap per trade in dollars regardless of balance
 MAX_CONTRACTS = 100            # hard cap on contracts per trade regardless of position size
-SAFETY_FLOOR = 1000.0          # bot shuts down if balance drops below $1200
+SAFETY_FLOOR = 1200.0          # bot shuts down if balance drops below $1200
 STRIKE_LIMIT = 3
 STOP_LOSS_THRESHOLD = 0.40
 OVERRIDE_TRIGGERED = False
@@ -103,6 +103,7 @@ def get_dynamic_risk(cash: float = 0):
         if 10.5 <= time_float < 12.0: return tier["high"],      True              # High confidence open
         if 12.0 <= time_float < 16.0: return tier["mid"],       True              # Balanced midday
         if 16.5 <= time_float < 17.5: return tier["high"],      True              # Primary close window
+        if 17.5 <= time_float < 20.0: return 0.05,            True              # Evening — fixed 5%
         if 22.0 <= time_float < 24.0: return tier["overnight"], True              # Asian open (7-day)
 
     elif day == 5:                                                                 # Saturday
