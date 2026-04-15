@@ -25,7 +25,7 @@ TRADES_FILE = os.path.join(BASE_DIR, "trades.json")
 
 MAX_SLIPPAGE = 2
 MAX_POSITION_DOLLARS = 500.0   # hard cap per trade in dollars regardless of balance
-MAX_CONTRACTS = 150            # hard cap on contracts per trade regardless of position size
+MAX_CONTRACTS = 100            # hard cap on contracts per trade regardless of position size
 SAFETY_FLOOR = 1200.0          # bot shuts down if balance drops below $1200
 STRIKE_LIMIT = 3
 STOP_LOSS_THRESHOLD = 0.40
@@ -169,7 +169,6 @@ def save_state(state):
 
 def update_trades_json(trade_entry):
     trades = []
-    trade_entry["category"] = "bot"
     if os.path.exists(TRADES_FILE):
         with open(TRADES_FILE, "r") as f:
             try: trades = json.load(f)
@@ -262,10 +261,9 @@ def place_order(ticker, side, count, action, price_cents=None):
 _last_skip_reason      = None   # tracks last skip reason to suppress log spam
 _rsi_stable_ticks      = 0      # counts consecutive ticks with RSI in safe zone
 _entry_lock            = False  # in-memory lock prevents double-buy race condition
-_manual_trade_trigger  = False  # T key pressed — place one manual trade at 25% this session
 
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.4.9 Active (Manual Trade Key)")
+    log("🪄 Magick Bot v5.5.0 Active")
 
     while True:
         try:
@@ -273,9 +271,6 @@ if __name__ == "__main__":
                 key = msvcrt.getch()
                 if key == b'\x1b': os._exit(0)
                 elif key.lower() == b'c': OVERRIDE_TRIGGERED = True
-                elif key.lower() == b't':
-                    _manual_trade_trigger = True
-                    log("\U0001f590\ufe0f Manual trade triggered — entering next qualifying contract at 25% risk.")
 
             now_et = datetime.now(pytz.timezone("US/Eastern"))
             state = load_state()
@@ -305,63 +300,6 @@ if __name__ == "__main__":
                 y_p, n_p = safe_price_cents(market.yes_bid_dollars), safe_price_cents(market.no_bid_dollars)
             else:
                 time_left = 0
-
-            # --- MANUAL TRADE TRIGGER (T key) ---
-            if _manual_trade_trigger and markets:
-                _manual_trade_trigger = False
-                # If there's an active trade, sell it first before entering manual
-                if curr and curr.get("status") == "filled":
-                    log(f"🖐️ Manual: selling existing {curr['side'].upper()} position first...")
-                    m_curr = client.get_market(curr['ticker']).market
-                    curr_bid = safe_price_cents(m_curr.yes_bid_dollars if curr['side'] == "yes" else m_curr.no_bid_dollars)
-                    sell_ok, sell_price, sell_qty = place_order(curr['ticker'], curr['side'], curr['count'], "sell", curr_bid)
-                    if sell_ok and sell_price > 0:
-                        sell_proceeds = sell_price * sell_qty / 100.0
-                        buy_cost      = curr['actual_entry_price'] * curr['count'] / 100.0
-                        exit_pnl      = sell_proceeds - buy_cost
-                        SESSION_PNL  += exit_pnl
-                        update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(exit_pnl, 2), "type": "MANUAL_EXIT", "category": curr.get("category", "bot")})
-                        log(f"🖐️ Existing position sold @ {sell_price}c. PnL: ${exit_pnl:+.2f}")
-                    else:
-                        log("⚠️ Manual: could not sell existing position — market may be closing. Aborting manual entry.")
-                        state["current_trade"] = None
-                        save_state(state)
-                        curr = None
-                        time.sleep(1)
-                        continue
-                    state["current_trade"] = None
-                    save_state(state)
-                    curr = None
-                # Now enter the manual trade
-                try:
-                    fresh_m = client.get_market(market.ticker).market
-                    y_p_m   = safe_price_cents(fresh_m.yes_bid_dollars)
-                    n_p_m   = safe_price_cents(fresh_m.no_bid_dollars)
-                    tl_m    = (fresh_m.close_time - now_et).total_seconds() / 60.0
-                    if 2.0 <= tl_m <= 4.5 and (95 <= y_p_m <= 98 or 95 <= n_p_m <= 98):
-                        side_m  = "yes" if 95 <= y_p_m <= 98 else "no"
-                        price_m = y_p_m if side_m == "yes" else n_p_m
-                        qty_m   = min(int((cash * 0.25) * 100 // price_m), MAX_CONTRACTS)
-                        if qty_m >= 1:
-                            log(f"🖐️ Manual Trade: {side_m.upper()} @ {price_m}c (Qty: {qty_m}) | 25% risk")
-                            success_m, paid_m, filled_m = place_order(market.ticker, side_m, qty_m, "buy", price_m)
-                            if success_m and filled_m > 0:
-                                state["current_trade"] = {
-                                    "ticker": market.ticker, "side": side_m, "count": filled_m,
-                                    "entry_price_cents": paid_m, "actual_entry_price": paid_m,
-                                    "status": "filled", "category": "manual"
-                                }
-                                save_state(state)
-                                play_sound("buy")
-                                log(f"🖐️ Manual filled: {filled_m} contracts @ {paid_m}c")
-                            else:
-                                log("⚠️ Manual trade failed or zero fill.")
-                        else:
-                            log("⚠️ Manual trade: insufficient balance for 25% position.")
-                    else:
-                        log(f"⚠️ Manual trade: no qualifying contract right now (time {tl_m:.1f}m left, Y:{y_p_m}c N:{n_p_m}c).")
-                except Exception as e:
-                    log(f"⚠️ Manual trade error: {e}")
 
             # --- MONITORING / STOP LOSS ---
             if curr and curr.get("status") == "filled":
@@ -434,7 +372,7 @@ if __name__ == "__main__":
                     won = (curr['side'] == res)
                     entry_p = curr['actual_entry_price']
                     pnl = (100 - entry_p) * curr['count'] / 100.0 if won else -(entry_p * curr['count'] / 100.0)
-                    update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "SETTLEMENT", "category": curr.get("category", "bot")})
+                    update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "SETTLEMENT"})
                     SESSION_PNL += pnl
                     log(f"🏁 RESULT: {res.upper()} | {'WIN' if won else 'LOSS'} | PnL: ${pnl:+.2f}")
                     state["strikes"] = 0 if won else state.get("strikes", 0) + 1
