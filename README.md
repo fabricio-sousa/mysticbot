@@ -1,6 +1,6 @@
-# 🪄 Magick Bot (v5.5.0)
+# 🪄 Mystic Bot (v5.5.0)
 
-Magick Bot is a fully autonomous algorithmic trading system built for the **Kalshi Bitcoin 15-Minute (KXBTC15M)** prediction markets. It targets high-confidence binary contracts, manages risk dynamically based on account balance, and operates 24/7 across a structured weekly schedule.
+Mystic Bot is a fully autonomous algorithmic trading system built for the **Kalshi Bitcoin 15-Minute (KXBTC15M)** prediction markets. It targets high-confidence binary contracts, manages risk dynamically based on account balance, and operates 24/7 across a structured weekly schedule.
 
 ---
 
