@@ -25,8 +25,8 @@ TRADES_FILE = os.path.join(BASE_DIR, "trades.json")
 
 MAX_SLIPPAGE = 2
 MAX_POSITION_DOLLARS = 500.0   # hard cap per trade in dollars regardless of balance
-MAX_CONTRACTS = 100            # hard cap on contracts per trade regardless of position size
-SAFETY_FLOOR = 1500.0          # bot shuts down if balance drops below $1200
+MAX_CONTRACTS = 200            # hard cap on contracts per trade regardless of position size
+SAFETY_FLOOR = 2400.0          # bot shuts down if balance drops below $2400
 STRIKE_LIMIT = 3
 STOP_LOSS_THRESHOLD = 0.40
 OVERRIDE_TRIGGERED = False
@@ -41,9 +41,10 @@ RSI_PERIOD = 9
 RSI_LIMITS_BY_WINDOW = {
     "overnight":  (25, 75),   # 12AM–5AM  — Asian session, low vol, wide band
     "asian_open": (25, 75),   # 10PM–12AM — similar character to overnight
-    "evening":    (30, 70),   # 5:30PM–10PM — reduced activity, moderate band
     "weekend":    (30, 70),   # Sat/Sun   — moderate, less macro risk
     "default":    (38, 62),   # All US hours — tightest, most momentum risk
+    # NOTE: Evening 5:30-8PM window DISABLED — end-of-day volatility produces
+    # outsized stops that wipe the whole session. Bot skips this window entirely.
 }
 
 def get_rsi_limits() -> tuple:
@@ -54,7 +55,6 @@ def get_rsi_limits() -> tuple:
     tf  = now.hour + (now.minute / 60.0)
     if day in (5, 6):                          return RSI_LIMITS_BY_WINDOW["weekend"]
     if 0.0  <= tf <  5.0:                      return RSI_LIMITS_BY_WINDOW["overnight"]
-    if 17.5 <= tf <  22.0:                     return RSI_LIMITS_BY_WINDOW["evening"]
     if 22.0 <= tf <  24.0:                     return RSI_LIMITS_BY_WINDOW["asian_open"]
     return RSI_LIMITS_BY_WINDOW["default"]
 
@@ -103,8 +103,8 @@ def get_dynamic_risk(cash: float = 0):
         if 10.5 <= time_float < 12.0: return tier["high"],      True              # High confidence open
         if 12.0 <= time_float < 16.0: return tier["mid"],       True              # Balanced midday
         if 16.5 <= time_float < 17.5: return tier["high"],      True              # Primary close window
-        if 17.5 <= time_float < 20.0: return 0.05,            True              # Evening — fixed 5%
-        if 22.0 <= time_float < 24.0: return tier["overnight"], True              # Asian open (7-day)
+        # 17.5–22.0 evening window DISABLED — end-of-day vol too dangerous
+        if 22.0 <= time_float < 24.0: return tier["overnight"], True              # Asian open
 
     elif day == 5:                                                                 # Saturday
         if  0.0 <= time_float < 10.0: return tier["overnight"], True              # Sat overnight
@@ -263,7 +263,7 @@ _rsi_stable_ticks      = 0      # counts consecutive ticks with RSI in safe zone
 _entry_lock            = False  # in-memory lock prevents double-buy race condition
 
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.5.0 Active")
+    log("🪄 Magick Bot v5.6.0 Active")
 
     while True:
         try:

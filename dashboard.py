@@ -30,13 +30,15 @@ def start_ngrok():
 
 app = Flask(__name__)
 
-# --- SCHEDULE DATA (matches bot v5.4.0 — auto risk scaling) ---
+# --- SCHEDULE DATA (matches bot v5.6.0 — auto risk scaling) ---
 # Risk shown is for current balance tier. Tiers:
 #   <$300 Recovery: 25% all windows
 #   $300-$600 Building: 15% high, 12% mid/weekend
 #   $600-$1500 Growth: 15% high, 10% overnight/mid, 8% weekend
 #   $1500-$5000 Established: 12% high, 8% overnight/mid, 6% weekend
 #   $5000+ Mature: 10% high, 5% overnight, 7% mid, 5% weekend
+# Safety floor: $2,400
+# Evening 5:30-8PM window DISABLED in v5.6.0
 
 # Mirrors get_balance_tier() in bot v5.4.0+
 BALANCE_TIERS = [
@@ -59,7 +61,7 @@ STRATEGY_SCHEDULE = [
     {"days": "Mon-Fri", "range": range(0, 5), "start": 1030, "end": 1200, "time_str": "10:30am–12:00pm","risk_key": "high",      "label": "High Confidence"},
     {"days": "Mon-Fri", "range": range(0, 5), "start": 1200, "end": 1600, "time_str": "12:00pm–4:00pm", "risk_key": "mid",       "label": "Balanced Midday"},
     {"days": "Mon-Fri", "range": range(0, 5), "start": 1630, "end": 1730, "time_str": "4:30pm–5:30pm",  "risk_key": "high",      "label": "Primary Window"},
-    {"days": "Mon-Fri", "range": range(0, 5), "start": 1730, "end": 2000, "time_str": "5:30pm–8:00pm",  "risk_key": "fixed_5",   "label": "Evening (5% Fixed)"},
+    {"days": "Mon-Fri", "range": range(0, 5), "start": 1730, "end": 2200, "time_str": "5:30pm–10:00pm", "risk_key": "skip",      "label": "Evening (Disabled)"},
     {"days": "All",     "range": range(0, 7), "start": 2200, "end": 2400, "time_str": "10:00pm–12:00am","risk_key": "overnight", "label": "Asian Open (7-day)"},
     {"days": "Saturday","range": [5],         "start":    0, "end": 1000, "time_str": "Sat 12am–10am",  "risk_key": "overnight", "label": "Saturday Overnight"},
     {"days": "Saturday","range": [5],         "start": 1000, "end": 1700, "time_str": "Sat 10am–5pm",   "risk_key": "weekend",   "label": "Saturday"},
