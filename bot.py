@@ -24,9 +24,9 @@ STATE_FILE = os.path.join(BASE_DIR, "state.json")
 TRADES_FILE = os.path.join(BASE_DIR, "trades.json")
 
 MAX_SLIPPAGE = 2
-MAX_POSITION_DOLLARS = 300.0   # hard cap per trade in dollars regardless of balance
-MAX_CONTRACTS = 250            # hard cap on contracts per trade regardless of position size
-SAFETY_FLOOR = 3000.0          # bot shuts down if balance drops below $3000
+MAX_POSITION_DOLLARS = 500.0   # hard cap per trade in dollars regardless of balance
+MAX_CONTRACTS = 100            # hard cap on contracts per trade regardless of position size
+SAFETY_FLOOR = 800         # bot shuts down if balance drops below $2400
 STRIKE_LIMIT = 3
 STOP_LOSS_THRESHOLD = 0.40
 OVERRIDE_TRIGGERED = False
@@ -107,12 +107,15 @@ def get_dynamic_risk(cash: float = 0):
         if 22.0 <= time_float < 24.0: return tier["overnight"], True              # Asian open
 
     elif day == 5:                                                                 # Saturday
-        if  0.0 <= time_float < 10.0: return tier["overnight"], True              # Sat overnight
-        if 10.0 <= time_float < 17.0: return tier["weekend"],   True              # Sat daytime
+        if  0.0 <= time_float <  5.0: return tier["overnight"], True              # Sat overnight
+        if  5.0 <= time_float <  8.5: return 0.01, False                          # Sat pre-market — skip (same risk as weekday)
+        if  8.5 <= time_float < 17.0: return tier["weekend"],   True              # Sat daytime
         if 22.0 <= time_float < 24.0: return tier["overnight"], True              # Sat Asian open
 
     elif day == 6:                                                                 # Sunday
-        if  0.0 <= time_float < 17.0: return tier["weekend"],   True              # Sun all day
+        if  0.0 <= time_float <  5.0: return tier["overnight"], True              # Sun overnight
+        if  5.0 <= time_float <  8.5: return 0.01, False                          # Sun pre-market — skip
+        if  8.5 <= time_float < 17.0: return tier["weekend"],   True              # Sun daytime
         if 22.0 <= time_float < 24.0: return tier["overnight"], True              # Sun Asian open
 
     return 0.01, False   # All other times — skip
@@ -263,7 +266,7 @@ _rsi_stable_ticks      = 0      # counts consecutive ticks with RSI in safe zone
 _entry_lock            = False  # in-memory lock prevents double-buy race condition
 
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.6.0 Active")
+    log("🪄 Magick Bot v5.6.2 Active")
 
     while True:
         try:
@@ -365,20 +368,33 @@ if __name__ == "__main__":
 
             # --- SETTLEMENT CHECK ---
             if curr and market.ticker != curr["ticker"]:
-                log(f"⏳ Finalizing {curr['ticker']}...")
-                time.sleep(35)
-                res = getattr(client.get_market(curr['ticker']).market, 'result', '').lower()
-                if res in ['yes', 'no']:
-                    won = (curr['side'] == res)
-                    entry_p = curr['actual_entry_price']
-                    pnl = (100 - entry_p) * curr['count'] / 100.0 if won else -(entry_p * curr['count'] / 100.0)
-                    update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "SETTLEMENT"})
-                    SESSION_PNL += pnl
-                    log(f"🏁 RESULT: {res.upper()} | {'WIN' if won else 'LOSS'} | PnL: ${pnl:+.2f}")
-                    state["strikes"] = 0 if won else state.get("strikes", 0) + 1
+                # Track when we first started waiting for this settlement
+                if not curr.get("finalizing_since"):
+                    curr["finalizing_since"] = now_et.timestamp()
+                    save_state(state)
+
+                waited_minutes = (now_et.timestamp() - curr["finalizing_since"]) / 60.0
+
+                # Timeout: abandon after 10 minutes (CF Benchmarks outage protection)
+                if waited_minutes > 10:
+                    log(f"⚠️ Settlement timeout after {waited_minutes:.0f}m — {curr['ticker']} never resolved (possible CF Benchmarks outage). Clearing state. Check Kalshi portfolio manually.")
                     state["current_trade"] = None
                     save_state(state)
-                    play_sound("settle_win" if won else "settle_loss")
+                else:
+                    log(f"⏳ Finalizing {curr['ticker']}... ({waited_minutes:.0f}m elapsed)")
+                    time.sleep(35)
+                    res = getattr(client.get_market(curr['ticker']).market, 'result', '').lower()
+                    if res in ['yes', 'no']:
+                        won = (curr['side'] == res)
+                        entry_p = curr['actual_entry_price']
+                        pnl = (100 - entry_p) * curr['count'] / 100.0 if won else -(entry_p * curr['count'] / 100.0)
+                        update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "SETTLEMENT"})
+                        SESSION_PNL += pnl
+                        log(f"🏁 RESULT: {res.upper()} | {'WIN' if won else 'LOSS'} | PnL: ${pnl:+.2f}")
+                        state["strikes"] = 0 if won else state.get("strikes", 0) + 1
+                        state["current_trade"] = None
+                        save_state(state)
+                        play_sound("settle_win" if won else "settle_loss")
 
             # --- ENTRY ---
             elif not curr and is_trading_window:
