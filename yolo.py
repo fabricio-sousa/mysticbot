@@ -25,8 +25,8 @@ TRADE_HISTORY_FILE = os.path.join(BASE_DIR, "trades.json")      # shared with ma
 YOLO_LOG_FILE      = os.path.join(BASE_DIR, "yolologs.json")    # yolo-only detail log
 
 # --- Position ---
-FIXED_POSITION_DOLLARS = 250.0   # fixed dollar size per trade
-SAFETY_FLOOR           = 800     # shutdown floor
+FIXED_POSITION_DOLLARS = 333.0   # fixed dollar size per trade
+SAFETY_FLOOR           = 1.0     # shutdown floor
 STRIKE_LIMIT           = 3       # stops before shutdown
 STOP_LOSS_THRESHOLD    = 0.40    # 40% stop
 
@@ -79,7 +79,7 @@ def load_state():
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             try: return json.load(f)
             except: pass
-    return {"strikes": 0, "current_trade": None}
+    return {"strikes": 0, "consecutive_wins": 0, "current_trade": None}
 
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
@@ -314,7 +314,8 @@ if __name__ == "__main__":
                             pnl = (actual_sell * filled_qty / 100.0) - (entry_p * curr['count'] / 100.0)
                             SESSION_PNL += pnl
                             log_trade({"ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "STOP_LOSS"})
-                            state["strikes"] = state.get("strikes", 0) + 1
+                            state["strikes"]          = state.get("strikes", 0) + 1
+                            state["consecutive_wins"] = 0
                             state["current_trade"] = None
                             save_state(state)
                             play_sound("stop")
@@ -359,8 +360,16 @@ if __name__ == "__main__":
                         pnl   = (100 - entry_p) * curr['count'] / 100.0 if won else -(entry_p * curr['count'] / 100.0)
                         SESSION_PNL += pnl
                         log_trade({"ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "SETTLEMENT"})
-                        log(f"🏁 RESULT: {res.upper()} | {'WIN ✅' if won else 'LOSS ❌'} | PnL: ${pnl:+.2f} | Session: ${SESSION_PNL:+.2f}")
-                        state["strikes"] = 0 if won else state.get("strikes", 0) + 1
+                        if won:
+                            consec = state.get("consecutive_wins", 0) + 1
+                            state["consecutive_wins"] = consec
+                            if consec >= 3 and state.get("strikes", 0) > 0:
+                                log(f"✅ 3 consecutive wins — strikes reset to 0 (was {state['strikes']})")
+                                state["strikes"] = 0
+                        else:
+                            state["strikes"]          = state.get("strikes", 0) + 1
+                            state["consecutive_wins"] = 0
+                        log(f"🏁 RESULT: {res.upper()} | {'WIN ✅' if won else 'LOSS ❌'} | PnL: ${pnl:+.2f} | Session: ${SESSION_PNL:+.2f} | Strikes: {state['strikes']} | ConsecWins: {state['consecutive_wins']}")
                         state["current_trade"] = None
                         save_state(state)
                         play_sound("settle_win" if won else "settle_loss")

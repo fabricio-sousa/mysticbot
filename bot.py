@@ -25,8 +25,8 @@ TRADES_FILE = os.path.join(BASE_DIR, "trades.json")
 
 MAX_SLIPPAGE = 2
 MAX_POSITION_DOLLARS = 500.0   # hard cap per trade in dollars regardless of balance
-MAX_CONTRACTS = 100            # hard cap on contracts per trade regardless of position size
-SAFETY_FLOOR = 800         # bot shuts down if balance drops below $2400
+MAX_CONTRACTS = 200            # hard cap on contracts per trade regardless of position size
+SAFETY_FLOOR = 2400.0          # bot shuts down if balance drops below $2400
 STRIKE_LIMIT = 3
 STOP_LOSS_THRESHOLD = 0.40
 OVERRIDE_TRIGGERED = False
@@ -165,7 +165,7 @@ def load_state():
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             try: return json.load(f)
             except: pass
-    return {"strikes": 0, "current_trade": None}
+    return {"strikes": 0, "consecutive_wins": 0, "current_trade": None}
 
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f: json.dump(state, f, indent=2)
@@ -319,7 +319,8 @@ if __name__ == "__main__":
                     if not success or actual_sell == 0:
                         # 409/404 = market already closed/settling — let settlement handle PnL
                         log(f"⚠️ Stop-loss sell rejected (market may have closed) — awaiting settlement.")
-                        state["strikes"] = state.get("strikes", 0) + 1
+                        state["strikes"]          = state.get("strikes", 0) + 1
+                        state["consecutive_wins"] = 0
                         save_state(state)
                         play_sound("stop")
                         time.sleep(60)
@@ -333,7 +334,8 @@ if __name__ == "__main__":
                     pnl = sell_proceeds - buy_cost
                     update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "STOP_LOSS"})
                     SESSION_PNL += pnl
-                    state["strikes"] = state.get("strikes", 0) + 1
+                    state["strikes"]          = state.get("strikes", 0) + 1
+                    state["consecutive_wins"] = 0
                     save_state(state)
                     play_sound("stop")
                     log(f"💸 Stop-loss complete. PnL: ${pnl:+.2f} | Strikes: {state['strikes']}")
@@ -390,8 +392,16 @@ if __name__ == "__main__":
                         pnl = (100 - entry_p) * curr['count'] / 100.0 if won else -(entry_p * curr['count'] / 100.0)
                         update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "SETTLEMENT"})
                         SESSION_PNL += pnl
-                        log(f"🏁 RESULT: {res.upper()} | {'WIN' if won else 'LOSS'} | PnL: ${pnl:+.2f}")
-                        state["strikes"] = 0 if won else state.get("strikes", 0) + 1
+                        if won:
+                            consec = state.get("consecutive_wins", 0) + 1
+                            state["consecutive_wins"] = consec
+                            if consec >= 3 and state.get("strikes", 0) > 0:
+                                log(f"✅ 3 consecutive wins — strikes reset to 0 (was {state['strikes']})")
+                                state["strikes"] = 0
+                        else:
+                            state["strikes"]          = state.get("strikes", 0) + 1
+                            state["consecutive_wins"] = 0
+                        log(f"🏁 RESULT: {res.upper()} | {'WIN' if won else 'LOSS'} | PnL: ${pnl:+.2f} | Strikes: {state['strikes']} | ConsecWins: {state['consecutive_wins']}")
                         state["current_trade"] = None
                         save_state(state)
                         play_sound("settle_win" if won else "settle_loss")
