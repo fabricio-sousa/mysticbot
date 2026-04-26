@@ -190,6 +190,83 @@ Based on live trading from April 12–15, 2026:
 
 ---
 
+## Yolo Bot
+
+feat: YOLO Bot v2.0 — auto-arm sniper bot for Kalshi KXBTC15M late-window entries
+
+## Summary
+Secondary trading bot that fires at 97–98c entries in the final 1.5–4.0 minutes
+of each 15-minute KXBTC15M market. Runs alongside magick_bot.py in a separate
+terminal. Shares trades.json and log.txt with the main bot but maintains its own
+state (yolostate.json) and detail log (yolologs.json).
+
+## Core Features
+- **Entry**: Only fires at 97c or 98c (high-confidence near-expiry prices)
+- **Window**: 4.0–1.5 minutes before market expiry only
+- **Auto-arm**: Automatically arms when RSI 35–70 AND Vol < $200
+- **Auto-disarm**: Instantly disarms when either condition breaks
+- **Manual trigger**: Press `T` to queue a manual fire (still subject to price/window checks)
+- **Manual override**: Press `C` to clear state | `ESC` to quit
+- **Stop loss**: 40% threshold on entry price
+- **Settlement timeout**: 10-minute timeout matching main bot (CF Benchmarks protection)
+- **Strike system**: 3 stops triggers shutdown
+- **Safety floor**: $600 — shuts down before serious account damage
+
+## Schedule (ET) — Mirrors Main Bot Exactly
+- BLOCKED: 5:00am–8:30am (Pre-market) — hard block, cannot fire even if armed
+- BLOCKED: 5:30pm–10:00pm (Evening) — hard block, cannot fire even if armed
+- ACTIVE: All other windows matching main bot schedule
+- During blocked windows: bot idles silently, manual T trigger also blocked
+
+## Auto-Arm Logic
+```
+Arm conditions (ALL must be true):
+  RSI >= 35 and RSI <= 70
+  BTC 5-candle volatility < $200
+
+Entry conditions (ALL must be true):
+  Auto-armed OR manual T trigger queued
+  Time remaining: 1.5m – 4.0m
+  Yes bid OR No bid is exactly 97c or 98c
+  Not in a blocked schedule window
+  No current open position
+```
+
+## Trade Logging (Dual Write)
+- `trades.json` — shared with main bot, identical format:
+  `{timestamp, ticker, side, pnl, type}` — dashboard reads this file only
+- `yolologs.json` — YOLO-only detail log with full trade metadata
+- `yolostate.json` — separate state file (doesn't conflict with main bot state)
+- `log.txt` — shared with main bot (prefixed with YOLO log messages)
+
+## Key Config (current)
+```
+FIXED_POSITION_DOLLARS = 250.0   # ~255 contracts at 98c
+SAFETY_FLOOR           = 600     # shutdown floor
+STRIKE_LIMIT           = 3
+STOP_LOSS_THRESHOLD    = 0.40    # 40% (tighter than main bot's 45%)
+TIME_WINDOW_MAX        = 4.0     # minutes before expiry
+TIME_WINDOW_MIN        = 1.5     # minutes before expiry
+RSI_ARM_LOW            = 35
+RSI_ARM_HIGH           = 70
+VOL_ARM_LIMIT          = 200
+```
+
+## Version History
+- v1.0.0 (Double Dip): Manual keyboard-trigger only, 333 contracts, no schedule
+- v2.0.0: Auto-arm with RSI/vol guards, manual T trigger retained as override
+- v2.0.1: Added schedule blocks (5–8:30AM, 5:30–10PM) matching main bot
+- v2.0.1: Added 10-minute settlement timeout (CF Benchmarks outage fix)
+- v2.0.1: Dual-write to trades.json (shared) + yolologs.json (detail)
+- v2.0.1: Reduced position to $250 fixed, safety floor raised to $600
+
+## Why Separate from Main Bot
+- Different entry logic (97-98c only vs 93-99c)
+- Different timing (last 4 min only vs full window)
+- Separate strike count — one bot stopping doesn't kill the other
+- Separate state prevents settlement conflicts
+- If either bot crashes, the other keeps running
+
 ## ⚠️ Disclaimer
 
 This bot trades real money on prediction markets. Past performance does not guarantee future results. Geopolitical events, macro data releases, and sudden BTC volatility can cause stop-losses. Always monitor the morning macro check before running the bot during high-risk news periods.
