@@ -16,3 +16,5 @@ __pycache__/
 *.py[cod]
 .env
 *.json
+yolomax.py
+yolo247.py

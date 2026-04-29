@@ -25,13 +25,13 @@ TRADE_HISTORY_FILE = os.path.join(BASE_DIR, "trades.json")      # shared with ma
 YOLO_LOG_FILE      = os.path.join(BASE_DIR, "yolologs.json")    # yolo-only detail log
 
 # --- Position ---
-FIXED_POSITION_DOLLARS = 333.0   # fixed dollar size per trade
-SAFETY_FLOOR           = 1.0     # shutdown floor
+FIXED_POSITION_DOLLARS = 500.0   # fixed dollar size per trade
+SAFETY_FLOOR           = 2000    # shutdown floor
 STRIKE_LIMIT           = 3       # stops before shutdown
 STOP_LOSS_THRESHOLD    = 0.40    # 40% stop
 
 # --- Entry window ---
-TIME_WINDOW_MAX = 4.0   # minutes before expiry — entry opens
+TIME_WINDOW_MAX = 4.5   # minutes before expiry — entry opens
 TIME_WINDOW_MIN = 1.5   # minutes before expiry — entry closes
 ENTRY_PRICES    = (97, 98)  # only 97c or 98c
 

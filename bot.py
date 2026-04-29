@@ -25,10 +25,10 @@ TRADES_FILE = os.path.join(BASE_DIR, "trades.json")
 
 MAX_SLIPPAGE = 2
 MAX_POSITION_DOLLARS = 500.0   # hard cap per trade in dollars regardless of balance
-MAX_CONTRACTS = 200            # hard cap on contracts per trade regardless of position size
-SAFETY_FLOOR = 2400.0          # bot shuts down if balance drops below $2400
+MAX_CONTRACTS = 250            # hard cap on contracts per trade regardless of position size
+SAFETY_FLOOR = 2000            # bot shuts down if balance drops below $2000
 STRIKE_LIMIT = 3
-STOP_LOSS_THRESHOLD = 0.40
+STOP_LOSS_THRESHOLD = 0.45
 OVERRIDE_TRIGGERED = False
 SESSION_PNL = 0.00
 
@@ -190,27 +190,27 @@ def play_sound(event_type):
 
 def parse_order(order) -> tuple[int, int]:
     """
-    Extract (filled_qty, avg_price_cents) from an order object.
+    Extract (filled_qty, avg_price_cents, fill_cost_dollars) from an order object.
     Fields confirmed via debug:
       - fill_count_fp:           contracts filled, string like '32.00'
       - taker_fill_cost_dollars: total cost when filled as taker
       - maker_fill_cost_dollars: total cost when filled as maker
     Orders can fill as either taker or maker — checks both.
-    Returns (0, 0) if unfilled.
+    Returns (0, 0, 0.0) if unfilled.
     """
     try:
         qty = int(float(getattr(order, 'fill_count_fp', '0') or '0'))
         if qty <= 0:
-            return 0, 0
+            return 0, 0, 0.0
         taker = float(getattr(order, 'taker_fill_cost_dollars', '0') or '0')
         maker = float(getattr(order, 'maker_fill_cost_dollars', '0') or '0')
         cost  = taker if taker > 0 else maker
         if cost == 0:
             log("⚠️ Both taker and maker fill cost are 0 — entry price unknown, PnL will be inaccurate.")
         avg_cents = int(round((cost / qty) * 100)) if cost > 0 else 0
-        return qty, avg_cents
+        return qty, avg_cents, round(cost, 4)
     except Exception:
-        return 0, 0
+        return 0, 0, 0.0
 
 # ====================== API SETUP ======================
 with open(APIKEY_FILE, "r", encoding="utf-8") as f: api_key_id = f.read().strip()
@@ -237,28 +237,28 @@ def place_order(ticker, side, count, action, price_cents=None):
         target_id = order.order_id
 
         # Check if already filled in the create response
-        qty, avg_cents = parse_order(order)
+        qty, avg_cents, fill_cost = parse_order(order)
         if qty > 0:
             log(f"⚡ Instant fill detected in create response: {qty} @ {avg_cents}c")
-            return True, avg_cents, qty
+            return True, avg_cents, qty, fill_cost
 
         # Not filled yet — poll for fill
         for _ in range(5):
             time.sleep(1.5)
             order_info = client.get_order(target_id).order
             status     = getattr(order_info, 'status', None)
-            qty, avg_cents = parse_order(order_info)
+            qty, avg_cents, fill_cost = parse_order(order_info)
             if qty > 0:
-                return True, avg_cents, qty
+                return True, avg_cents, qty, fill_cost
             if status is not None and str(status).lower() in ['canceled', 'expired']:
                 log(f"ℹ️ Order {target_id} {status} during polling.")
                 break
 
-        return False, 0, 0
+        return False, 0, 0, 0.0
 
     except Exception as e:
         log(f"❌ Order Error: {e}")
-        return False, 0, 0
+        return False, 0, 0, 0.0
 
 # ====================== MAIN LOOP ======================
 _last_skip_reason      = None   # tracks last skip reason to suppress log spam
@@ -315,7 +315,7 @@ if __name__ == "__main__":
                     log(f"🚨 STOP LOSS: Selling {curr['ticker']} (Live: {live_bid}c | SL: {stop_p}c)")
                     state["current_trade"] = None
                     save_state(state)
-                    success, actual_sell, filled_qty = place_order(curr['ticker'], curr['side'], curr['count'], "sell", live_bid)
+                    success, actual_sell, filled_qty, _ = place_order(curr['ticker'], curr['side'], curr['count'], "sell", live_bid)
                     if not success or actual_sell == 0:
                         # 409/404 = market already closed/settling — let settlement handle PnL
                         log(f"⚠️ Stop-loss sell rejected (market may have closed) — awaiting settlement.")
@@ -328,9 +328,14 @@ if __name__ == "__main__":
                     # Sanity check: if sell price deviates massively from live_bid, log a warning
                     if abs(actual_sell - live_bid) > 20:
                         log(f"⚠️ Sell fill ({actual_sell}c) deviates from live bid ({live_bid}c) — PnL may be inaccurate.")
-                    # PnL: sell proceeds minus buy cost, both in dollars
+                    # PnL: sell proceeds minus actual buy cost in dollars
+                    # Use actual_fill_cost stored at entry if available — avoids rounding errors
+                    # from integer cent conversion (e.g. 95.02c stored as 95c * qty)
                     sell_proceeds = actual_sell * filled_qty / 100.0
-                    buy_cost      = entry_p * curr['count'] / 100.0
+                    if curr.get('actual_fill_cost_dollars'):
+                        buy_cost = curr['actual_fill_cost_dollars']
+                    else:
+                        buy_cost = entry_p * curr['count'] / 100.0
                     pnl = sell_proceeds - buy_cost
                     update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "STOP_LOSS"})
                     SESSION_PNL += pnl
@@ -449,11 +454,12 @@ if __name__ == "__main__":
                         if qty >= 1 and not _entry_lock:
                             _entry_lock = True
                             log(f"⚡ Pursuit: {side.upper()} @ {price}c (Qty: {qty}) | RSI: {current_rsi}")
-                            success, actual_paid, filled_qty = place_order(market.ticker, side, qty, "buy", price)
+                            success, actual_paid, filled_qty, fill_cost = place_order(market.ticker, side, qty, "buy", price)
                             if success and filled_qty > 0:
                                 state["current_trade"] = {
                                     "ticker": market.ticker, "side": side, "count": filled_qty,
-                                    "entry_price_cents": actual_paid, "actual_entry_price": actual_paid, "status": "filled"
+                                    "entry_price_cents": actual_paid, "actual_entry_price": actual_paid,
+                                    "actual_fill_cost_dollars": fill_cost, "status": "filled"
                                 }
                                 save_state(state)
                                 _entry_lock = False

@@ -103,7 +103,7 @@ def get_financial_data():
 def index():
     data         = get_financial_data()
     current_win  = get_current_window()
-    current_tier = get_tier_for_balance(1538)  # update as balance grows
+    current_tier = get_tier_for_balance(3101)  # update as balance grows
 
     if "error" in data:
         return f"<body style='background:#0d1117;color:white;padding:50px;'><h2>⚠️ {data['error']}</h2></body>"
