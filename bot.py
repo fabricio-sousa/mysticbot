@@ -25,8 +25,8 @@ TRADES_FILE = os.path.join(BASE_DIR, "trades.json")
 
 MAX_SLIPPAGE = 0
 MAX_POSITION_DOLLARS = 500.0   # hard cap per trade in dollars regardless of balance
-MAX_CONTRACTS = 100            # hard cap on contracts per trade regardless of position size
-SAFETY_FLOOR = 1            # bot shuts down if balance drops below $2000
+MAX_CONTRACTS = 300            # hard cap on contracts per trade regardless of position size
+SAFETY_FLOOR = 2400            # bot shuts down if balance drops below $2000
 STRIKE_LIMIT = 3
 STOP_LOSS_THRESHOLD = 0.45
 OVERRIDE_TRIGGERED = False
@@ -40,7 +40,8 @@ RSI_PERIOD = 9
 # Format: (low_limit, high_limit)
 RSI_LIMITS_BY_WINDOW = {
     "overnight":  (25, 75),   # 12AM–5AM  — Asian session, low vol, wide band
-    "asian_open": (25, 75),   # 10PM–12AM — similar character to overnight
+    "asian_open": (30, 68),   # 10PM–12AM — tightened: low vol but macro news can
+                              #              whip hard at this hour; trim the extremes
     "weekend":    (30, 70),   # Sat/Sun   — moderate, less macro risk
     "default":    (38, 62),   # All US hours — tightest, most momentum risk
     # NOTE: Evening 5:30-8PM window DISABLED — end-of-day volatility produces
@@ -242,19 +243,48 @@ def place_order(ticker, side, count, action, price_cents=None):
         order     = resp.order
         target_id = order.order_id
 
+        # Max allowed deviation between intended price and actual fill.
+        # Buys should never fill more than 5c below target (Kalshi quirk protection).
+        # Sells should never fill more than 5c above target.
+        MAX_FILL_DEVIATION = 5
+
+        def validate_fill(qty, avg_cents, fill_cost, label=""):
+            """Returns (qty, avg_cents, fill_cost) if valid, else (0,0,0).
+
+            Deviation logic — reject only when filled WORSE than target:
+              Buy:  reject if filled much cheaper than target (Kalshi ghost-fill quirk).
+                    deviation = price_cents - avg_cents  → positive = filled below target
+              Sell: reject if filled much cheaper than target (got less than expected).
+                    deviation = price_cents - avg_cents  → positive = filled below target
+            Getting a BETTER price than target (buy cheaper / sell higher) is always accepted.
+            """
+            if qty <= 0:
+                return 0, 0, 0.0
+            if price_cents is not None:
+                # Same formula for both sides: positive = filled below target (worse than intended)
+                deviation = price_cents - avg_cents
+                if deviation > MAX_FILL_DEVIATION:
+                    log(f"🚨 FILL DEVIATION{' '+label if label else ''}: targeted {price_cents}c but filled {avg_cents}c (deviation={deviation}c > {MAX_FILL_DEVIATION}c limit). Rejecting fill — check Kalshi portfolio.")
+                    return 0, 0, 0.0
+            return qty, avg_cents, fill_cost
+
         # Check if already filled in the create response
         qty, avg_cents, fill_cost = parse_order(order)
+        qty, avg_cents, fill_cost = validate_fill(qty, avg_cents, fill_cost, "instant")
         if qty > 0:
             log(f"⚡ Instant fill detected in create response: {qty} @ {avg_cents}c")
             return True, avg_cents, qty, fill_cost
 
-        # Not filled yet — poll for fill
-        for _ in range(5):
-            time.sleep(1.5)
+        # Not filled yet — poll for fill (up to 20s total: 10 x 2s)
+        # Kalshi sometimes takes 5-15s to confirm partial fills on thin markets.
+        for attempt in range(10):
+            time.sleep(2)
             order_info = client.get_order(target_id).order
             status     = getattr(order_info, 'status', None)
             qty, avg_cents, fill_cost = parse_order(order_info)
+            qty, avg_cents, fill_cost = validate_fill(qty, avg_cents, fill_cost, f"poll-{attempt+1}")
             if qty > 0:
+                log(f"⏱️ Fill confirmed after {(attempt+1)*2}s polling: {qty} @ {avg_cents}c")
                 return True, avg_cents, qty, fill_cost
             if status is not None and str(status).lower() in ['canceled', 'expired']:
                 log(f"ℹ️ Order {target_id} {status} during polling.")
@@ -273,7 +303,7 @@ _entry_lock            = False  # in-memory lock prevents double-buy race condit
 _locked_tickers        = set()  # tickers already traded this session — never re-enter
 
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.6.2 Active")
+    log("🪄 Magick Bot v5.6.3 Active")
 
     while True:
         try:
@@ -318,7 +348,11 @@ if __name__ == "__main__":
                 m_live   = client.get_market(curr['ticker']).market
                 live_bid = safe_price_cents(m_live.yes_bid_dollars if curr['side'] == "yes" else m_live.no_bid_dollars)
                 entry_p  = curr['actual_entry_price']
-                stop_p   = round(entry_p * (1 - STOP_LOSS_THRESHOLD), 2)
+                # Tighter stop for high-price entries (>=90c): 35% instead of 45%.
+                # At 93c entry a 45% SL triggers at ~51c — just 42c drop, one bad candle.
+                # At 35% SL it triggers at ~60c: still protects, but far less wick-prone.
+                effective_sl = 0.35 if entry_p >= 90 else STOP_LOSS_THRESHOLD
+                stop_p   = round(entry_p * (1 - effective_sl), 2)
 
                 if 0 < live_bid <= stop_p and time_left > 0.5:
                     log(f"⚠️ STOP WARNING: {curr['ticker']} @ {live_bid}c (SL: {stop_p}c) — confirming in 2s...")
@@ -334,6 +368,17 @@ if __name__ == "__main__":
                         if not success or actual_sell == 0:
                             # 409/404 = market already closed/settling — let settlement handle PnL
                             log(f"⚠️ Stop-loss sell rejected (market may have closed) — awaiting settlement.")
+                            # Log the rejected stop-loss so trades.json always has a record
+                            update_trades_json({
+                                "timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"),
+                                "ticker": curr['ticker'],
+                                "side": curr['side'],
+                                "entry_price": curr.get('actual_entry_price'),
+                                "exit_price": None,
+                                "pnl": None,
+                                "type": "STOP_LOSS_REJECTED",
+                                "note": "Sell order rejected or unconfirmed — awaiting settlement"
+                            })
                             state["strikes"]          = state.get("strikes", 0) + 1
                             state["consecutive_wins"] = 0
                             state["current_trade"]    = None
@@ -478,25 +523,80 @@ if __name__ == "__main__":
                         qty = min(qty, MAX_CONTRACTS)
                         if qty >= 1 and not _entry_lock:
                             _entry_lock = True
-                            log(f"⚡ Pursuit: {side.upper()} @ {price}c (Qty: {qty}) | RSI: {current_rsi}")
-                            success, actual_paid, filled_qty, fill_cost = place_order(market.ticker, side, qty, "buy", price)
-                            if success and filled_qty > 0:
+
+                            # --- SWEEP RETRY LOGIC ---
+                            # Attempt 1: exact price (MAX_SLIPPAGE=0, best EV)
+                            # Attempt 2: price+1c (thin market sweep)
+                            # Attempt 3: price+2c (last resort, still within 98c ceiling)
+                            # Caps at 98c — never pays 99c on a pursuit entry.
+                            # Each retry re-checks time_left to avoid entering too close to close.
+                            filled_qty, actual_paid, fill_cost = 0, 0, 0.0
+                            for sweep in range(3):
+                                sweep_price = min(98, price + sweep)
+                                # Recalculate qty at sweep price (fewer contracts = smaller position)
+                                sweep_qty = int(min(MAX_POSITION_DOLLARS, (cash * risk_decimal)) * 100 // sweep_price)
+                                sweep_qty = min(sweep_qty, MAX_CONTRACTS)
+                                if sweep_qty < 1: break
+                                # Re-check time left — don't enter if < 2 min remaining
+                                try:
+                                    tl_check = (client.get_market(market.ticker).market.close_time - datetime.now(pytz.timezone("US/Eastern"))).total_seconds() / 60.0
+                                    if tl_check < 2.0:
+                                        log(f"⏱️ Sweep abort: only {tl_check:.1f}m left on market.")
+                                        break
+                                except Exception:
+                                    pass
+                                # Live RSI re-check before each sweep attempt.
+                                # Catches cases where RSI drifted out of bounds between the
+                                # initial entry gate and the sweep — the most likely cause of
+                                # the RSI 67.2 bypass seen in session logs.
+                                live_rsi = get_btc_rsi()
+                                rsi_low, rsi_high = get_rsi_limits()
+                                if live_rsi < rsi_low or live_rsi > rsi_high:
+                                    log(f"⛔ Pre-sweep RSI gate: live RSI={live_rsi} out of [{rsi_low},{rsi_high}] — aborting entry.")
+                                    _entry_lock = False
+                                    break
+                                if sweep == 0:
+                                    log(f"⚡ Pursuit: {side.upper()} @ {sweep_price}c (Qty: {sweep_qty}) | RSI: {live_rsi}")
+                                else:
+                                    log(f"🔄 Sweep retry {sweep}: {side.upper()} @ {sweep_price}c (Qty: {sweep_qty}) | RSI: {live_rsi}")
+                                success, actual_paid, filled_qty, fill_cost = place_order(market.ticker, side, sweep_qty, "buy", sweep_price)
+                                if success and filled_qty > 0:
+                                    break  # filled — stop sweeping
+                                # Ghost fill check after each failed attempt
+                                try:
+                                    post_cash = client.get_balance().balance / 100.0
+                                    expected_cost = (sweep_price * sweep_qty) / 100.0
+                                    drop = cash - post_cash
+                                    if drop >= (expected_cost * 0.5):
+                                        log(f"🚨 GHOST FILL DETECTED: Cash dropped ${drop:.2f} on sweep {sweep} for {market.ticker}. Locking ticker.")
+                                        _locked_tickers.add(market.ticker)
+                                        log(f"🔒 Ticker locked (ghost fill): {market.ticker}")
+                                        _entry_lock = False
+                                        break
+                                except Exception as be:
+                                    log(f"⚠️ Balance check error on sweep {sweep}: {be}")
+                                if sweep < 2:
+                                    time.sleep(3)  # brief pause before next sweep attempt
+
+                            if filled_qty > 0 and market.ticker not in _locked_tickers:
                                 state["current_trade"] = {
                                     "ticker": market.ticker, "side": side, "count": filled_qty,
                                     "entry_price_cents": actual_paid, "actual_entry_price": actual_paid,
                                     "actual_fill_cost_dollars": fill_cost, "status": "filled"
                                 }
                                 save_state(state)
-                                _locked_tickers.add(market.ticker)  # lock — never re-enter this market
+                                _locked_tickers.add(market.ticker)
                                 log(f"🔒 Ticker locked: {market.ticker}")
                                 _entry_lock = False
                                 play_sound("buy")
                                 log(f"✅ Filled: {filled_qty} contracts @ {actual_paid}c")
                                 time.sleep(5)
+                            elif market.ticker not in _locked_tickers:
+                                _entry_lock = False
+                                log("⚠️ All sweep attempts failed. 15s Cooldown...")
+                                time.sleep(15)
                             else:
                                 _entry_lock = False
-                                log("⚠️ Entry failed or zero fill. 15s Cooldown...")
-                                time.sleep(15)
 
             time.sleep(1)
         except Exception as e:
