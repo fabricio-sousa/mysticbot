@@ -25,12 +25,21 @@ TRADES_FILE = os.path.join(BASE_DIR, "trades.json")
 
 MAX_SLIPPAGE = 0
 MAX_POSITION_DOLLARS = 500.0   # hard cap per trade in dollars regardless of balance
-MAX_CONTRACTS = 300            # hard cap on contracts per trade regardless of position size
-SAFETY_FLOOR = 2400            # bot shuts down if balance drops below $2000
+MAX_CONTRACTS = 100            # hard cap on contracts per trade regardless of position size
+SAFETY_FLOOR = 1            # bot shuts down if balance drops below $2000
 STRIKE_LIMIT = 3
+STRIKE_CLEAR_WINS = 3       # consecutive wins needed to clear 1 strike
 STOP_LOSS_THRESHOLD = 0.45
 OVERRIDE_TRIGGERED = False
 SESSION_PNL = 0.00
+
+# --- Session drawdown guard ---
+# If session PnL drops below this threshold, pause trading for DRAWDOWN_PAUSE_MINUTES.
+# Protects against the "slow bleed" pattern (alternating wins/losses) that
+# the 3-strike system alone doesn't catch.
+SESSION_DRAWDOWN_LIMIT   = -400.0   # pause if session drops $400
+DRAWDOWN_PAUSE_MINUTES   = 30       # pause duration in minutes
+_drawdown_pause_until    = None     # internal: tracks pause expiry (datetime)
 
 # --- RSI ---
 RSI_PERIOD = 9
@@ -40,8 +49,7 @@ RSI_PERIOD = 9
 # Format: (low_limit, high_limit)
 RSI_LIMITS_BY_WINDOW = {
     "overnight":  (25, 75),   # 12AM–5AM  — Asian session, low vol, wide band
-    "asian_open": (30, 68),   # 10PM–12AM — tightened: low vol but macro news can
-                              #              whip hard at this hour; trim the extremes
+    "asian_open": (25, 75),   # 10PM–12AM — similar character to overnight
     "weekend":    (30, 70),   # Sat/Sun   — moderate, less macro risk
     "default":    (38, 62),   # All US hours — tightest, most momentum risk
     # NOTE: Evening 5:30-8PM window DISABLED — end-of-day volatility produces
@@ -249,20 +257,11 @@ def place_order(ticker, side, count, action, price_cents=None):
         MAX_FILL_DEVIATION = 5
 
         def validate_fill(qty, avg_cents, fill_cost, label=""):
-            """Returns (qty, avg_cents, fill_cost) if valid, else (0,0,0).
-
-            Deviation logic — reject only when filled WORSE than target:
-              Buy:  reject if filled much cheaper than target (Kalshi ghost-fill quirk).
-                    deviation = price_cents - avg_cents  → positive = filled below target
-              Sell: reject if filled much cheaper than target (got less than expected).
-                    deviation = price_cents - avg_cents  → positive = filled below target
-            Getting a BETTER price than target (buy cheaper / sell higher) is always accepted.
-            """
+            """Returns (qty, avg_cents, fill_cost) if valid, else (0,0,0)."""
             if qty <= 0:
                 return 0, 0, 0.0
             if price_cents is not None:
-                # Same formula for both sides: positive = filled below target (worse than intended)
-                deviation = price_cents - avg_cents
+                deviation = price_cents - avg_cents if action == "buy" else avg_cents - price_cents
                 if deviation > MAX_FILL_DEVIATION:
                     log(f"🚨 FILL DEVIATION{' '+label if label else ''}: targeted {price_cents}c but filled {avg_cents}c (deviation={deviation}c > {MAX_FILL_DEVIATION}c limit). Rejecting fill — check Kalshi portfolio.")
                     return 0, 0, 0.0
@@ -301,9 +300,10 @@ _last_skip_reason      = None   # tracks last skip reason to suppress log spam
 _rsi_stable_ticks      = 0      # counts consecutive ticks with RSI in safe zone
 _entry_lock            = False  # in-memory lock prevents double-buy race condition
 _locked_tickers        = set()  # tickers already traded this session — never re-enter
+_wins_since_strike     = 0      # consecutive wins since last strike — must hit STRIKE_CLEAR_WINS to clear
 
 if __name__ == "__main__":
-    log("🪄 Magick Bot v5.6.3 Active")
+    log("🪄 Magick Bot v5.6.2 Active")
 
     while True:
         try:
@@ -330,6 +330,24 @@ if __name__ == "__main__":
                 log(f"🚨 Shutdown: Cash ${cash:.2f} | Strikes {state.get('strikes')}")
                 break
 
+            # --- SESSION DRAWDOWN GUARD ---
+            if SESSION_PNL <= SESSION_DRAWDOWN_LIMIT:
+                if _drawdown_pause_until is None or now_et >= _drawdown_pause_until:
+                    _drawdown_pause_until = now_et.replace(tzinfo=None) if now_et.tzinfo is None else now_et
+                    import datetime as _dt
+                    _drawdown_pause_until = now_et + _dt.timedelta(minutes=DRAWDOWN_PAUSE_MINUTES)
+                    log(f"⏸️ DRAWDOWN PAUSE: Session PnL ${SESSION_PNL:+.2f} hit limit ${SESSION_DRAWDOWN_LIMIT:.0f}. Pausing {DRAWDOWN_PAUSE_MINUTES}m until {_drawdown_pause_until.strftime('%H:%M ET')}.")
+                    play_sound("stop")
+                if now_et < _drawdown_pause_until:
+                    remaining = (_drawdown_pause_until - now_et).seconds // 60
+                    pause_str = f"DRAWDOWN PAUSE — {remaining}m remaining | Session: ${SESSION_PNL:+.2f}"
+                    print(f"\r⏸️ {pause_str:<100}", end="", flush=True)
+                    time.sleep(30)
+                    continue
+                else:
+                    log(f"▶️ Drawdown pause expired — resuming. Session: ${SESSION_PNL:+.2f}")
+                    _drawdown_pause_until = None
+
             resp = client.get_markets(series_ticker="KXBTC15M", limit=5, status="open")
             markets = [m for m in getattr(resp, 'markets', []) if (m.close_time - now_et).total_seconds() > 0]
 
@@ -348,11 +366,7 @@ if __name__ == "__main__":
                 m_live   = client.get_market(curr['ticker']).market
                 live_bid = safe_price_cents(m_live.yes_bid_dollars if curr['side'] == "yes" else m_live.no_bid_dollars)
                 entry_p  = curr['actual_entry_price']
-                # Tighter stop for high-price entries (>=90c): 35% instead of 45%.
-                # At 93c entry a 45% SL triggers at ~51c — just 42c drop, one bad candle.
-                # At 35% SL it triggers at ~60c: still protects, but far less wick-prone.
-                effective_sl = 0.35 if entry_p >= 90 else STOP_LOSS_THRESHOLD
-                stop_p   = round(entry_p * (1 - effective_sl), 2)
+                stop_p   = round(entry_p * (1 - STOP_LOSS_THRESHOLD), 2)
 
                 if 0 < live_bid <= stop_p and time_left > 0.5:
                     log(f"⚠️ STOP WARNING: {curr['ticker']} @ {live_bid}c (SL: {stop_p}c) — confirming in 2s...")
@@ -368,17 +382,6 @@ if __name__ == "__main__":
                         if not success or actual_sell == 0:
                             # 409/404 = market already closed/settling — let settlement handle PnL
                             log(f"⚠️ Stop-loss sell rejected (market may have closed) — awaiting settlement.")
-                            # Log the rejected stop-loss so trades.json always has a record
-                            update_trades_json({
-                                "timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"),
-                                "ticker": curr['ticker'],
-                                "side": curr['side'],
-                                "entry_price": curr.get('actual_entry_price'),
-                                "exit_price": None,
-                                "pnl": None,
-                                "type": "STOP_LOSS_REJECTED",
-                                "note": "Sell order rejected or unconfirmed — awaiting settlement"
-                            })
                             state["strikes"]          = state.get("strikes", 0) + 1
                             state["consecutive_wins"] = 0
                             state["current_trade"]    = None
@@ -402,10 +405,11 @@ if __name__ == "__main__":
                         SESSION_PNL += pnl
                         state["strikes"]          = state.get("strikes", 0) + 1
                         state["consecutive_wins"] = 0
+                        _wins_since_strike        = 0  # loss resets clearing streak
                         state["current_trade"]    = None   # cleared AFTER successful sell
                         save_state(state)
                         play_sound("stop")
-                        log(f"💸 Stop-loss complete. PnL: ${pnl:+.2f} | Strikes: {state['strikes']}")
+                        log(f"💸 Stop-loss complete. PnL: ${pnl:+.2f} | Strikes: {state['strikes']}/{STRIKE_LIMIT} | Need {STRIKE_CLEAR_WINS} wins to clear")
                         log(f"⏸️ Post-SL cooldown (60s) — skipping next entry window.")
                         time.sleep(60)
                         continue
@@ -454,21 +458,28 @@ if __name__ == "__main__":
                     time.sleep(35)
                     res = getattr(client.get_market(curr['ticker']).market, 'result', '').lower()
                     if res in ['yes', 'no']:
-                        won = (curr['side'] == res)
+                        won     = (curr['side'] == res)
                         entry_p = curr['actual_entry_price']
-                        pnl = (100 - entry_p) * curr['count'] / 100.0 if won else -(entry_p * curr['count'] / 100.0)
+                        pnl     = (100 - entry_p) * curr['count'] / 100.0 if won else -(entry_p * curr['count'] / 100.0)
                         update_trades_json({"timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S"), "ticker": curr['ticker'], "side": curr['side'], "pnl": round(pnl, 2), "type": "SETTLEMENT"})
                         SESSION_PNL += pnl
                         if won:
-                            consec = state.get("consecutive_wins", 0) + 1
-                            state["consecutive_wins"] = consec
-                            if consec >= 3 and state.get("strikes", 0) > 0:
-                                log(f"✅ 3 consecutive wins — strikes reset to 0 (was {state['strikes']})")
-                                state["strikes"] = 0
+                            if state.get("strikes", 0) > 0:
+                                _wins_since_strike += 1
+                                if _wins_since_strike >= STRIKE_CLEAR_WINS:
+                                    state["strikes"] = max(0, state["strikes"] - 1)
+                                    _wins_since_strike = 0
+                                    log(f"🏁 RESULT: YES | WIN | PnL: ${pnl:+.2f} | ✅ Strike cleared! Strikes remaining: {state['strikes']}/{STRIKE_LIMIT}")
+                                else:
+                                    log(f"🏁 RESULT: YES | WIN | PnL: ${pnl:+.2f} | Strikes: {state['strikes']}/{STRIKE_LIMIT} | Clearing: {_wins_since_strike}/{STRIKE_CLEAR_WINS} wins")
+                            else:
+                                _wins_since_strike = 0
+                                log(f"🏁 RESULT: YES | WIN | PnL: ${pnl:+.2f} | Strikes: 0 | Session: ${SESSION_PNL:+.2f}")
                         else:
-                            state["strikes"]          = state.get("strikes", 0) + 1
-                            state["consecutive_wins"] = 0
-                        log(f"🏁 RESULT: {res.upper()} | {'WIN' if won else 'LOSS'} | PnL: ${pnl:+.2f} | Strikes: {state['strikes']} | ConsecWins: {state['consecutive_wins']}")
+                            state["strikes"]   = state.get("strikes", 0) + 1
+                            _wins_since_strike = 0  # loss resets the clearing streak
+                            log(f"🏁 RESULT: NO | LOSS | PnL: ${pnl:+.2f} | Strikes: {state['strikes']}/{STRIKE_LIMIT} | Need {STRIKE_CLEAR_WINS} consecutive wins to clear")
+
                         _locked_tickers.add(curr['ticker'])  # lock settled ticker — belt-and-suspenders
                         state["current_trade"] = None
                         save_state(state)
@@ -545,20 +556,10 @@ if __name__ == "__main__":
                                         break
                                 except Exception:
                                     pass
-                                # Live RSI re-check before each sweep attempt.
-                                # Catches cases where RSI drifted out of bounds between the
-                                # initial entry gate and the sweep — the most likely cause of
-                                # the RSI 67.2 bypass seen in session logs.
-                                live_rsi = get_btc_rsi()
-                                rsi_low, rsi_high = get_rsi_limits()
-                                if live_rsi < rsi_low or live_rsi > rsi_high:
-                                    log(f"⛔ Pre-sweep RSI gate: live RSI={live_rsi} out of [{rsi_low},{rsi_high}] — aborting entry.")
-                                    _entry_lock = False
-                                    break
                                 if sweep == 0:
-                                    log(f"⚡ Pursuit: {side.upper()} @ {sweep_price}c (Qty: {sweep_qty}) | RSI: {live_rsi}")
+                                    log(f"⚡ Pursuit: {side.upper()} @ {sweep_price}c (Qty: {sweep_qty}) | RSI: {current_rsi}")
                                 else:
-                                    log(f"🔄 Sweep retry {sweep}: {side.upper()} @ {sweep_price}c (Qty: {sweep_qty}) | RSI: {live_rsi}")
+                                    log(f"🔄 Sweep retry {sweep}: {side.upper()} @ {sweep_price}c (Qty: {sweep_qty})")
                                 success, actual_paid, filled_qty, fill_cost = place_order(market.ticker, side, sweep_qty, "buy", sweep_price)
                                 if success and filled_qty > 0:
                                     break  # filled — stop sweeping
